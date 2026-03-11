@@ -5,7 +5,7 @@ from typing import Optional, List
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.database.models import UserDB
-from app.utils.auth import get_password_hash, verify_password
+from app.utils.auth import get_password_hash, verify_password, verify_password_async
 
 
 async def get_user_by_email(db: AsyncSession, email: str) -> Optional[UserDB]:
@@ -22,7 +22,7 @@ async def authenticate_user(db: AsyncSession, email: str, password: str) -> Opti
     user = await get_user_by_email(db, email)
     if not user:
         return None
-    if not verify_password(password, user.hashed_password):
+    if not await verify_password_async(password, user.hashed_password):
         return None
     return user
 

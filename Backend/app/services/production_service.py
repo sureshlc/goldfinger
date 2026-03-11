@@ -6,14 +6,6 @@ Caching Strategy:
 - Item details: CACHED (1 hour default)
 - SKU/ID resolution: CACHED (1 hour default)
 - Inventory levels: CACHED (5 minutes default) - short TTL for near-real-time accuracy
-
-Usage:
-    service = ProductionService(
-        enable_cache=True,
-        bom_ttl_seconds=3600,
-        item_details_ttl_seconds=3600,
-        inventory_ttl_seconds=300
-    )
 """
 from typing import List, Dict, Optional, Tuple
 import asyncio
@@ -71,19 +63,8 @@ class ProductionService:
         item_details_ttl_seconds: int = 3600,
         inventory_ttl_seconds: int = 300
     ):
-        """
-        Initialize ProductionService with optional caching.
-
-        Args:
-            netsuite_service: NetSuite service instance
-            enable_cache: Enable caching for BOM, item details, and inventory (default: True)
-            bom_ttl_seconds: Cache TTL for BOM data (default: 1 hour)
-            item_details_ttl_seconds: Cache TTL for item details (default: 1 hour)
-            inventory_ttl_seconds: Cache TTL for inventory data (default: 5 minutes)
-        """
         self.netsuite_service = netsuite_service or NetSuiteService()
 
-        # Initialize cache manager if enabled
         self.cache_manager = None
         if enable_cache:
             self.cache_manager = CacheManager(
@@ -99,76 +80,50 @@ class ProductionService:
         else:
             logger.info("ProductionService initialized WITHOUT caching")
 
-        # IMPORTANT: Pass cache manager to BOM service so it can cache recursive BOM fetches
         self.bom_service = BOMService(self.netsuite_service, self.cache_manager)
         self.inventory_service = InventoryService(self.netsuite_service)
 
-        # Define water constants at class level
         self.water_sku = "1229999"
         self.water_id = "1210"
 
     async def _resolve_identifier(self, identifier: str) -> Optional[str]:
-        """
-        Resolve SKU or ID with optional caching.
-        
-        Note: Local CSV lookup is already fast, so we only cache 
-        NetSuite fallback results to avoid expensive API calls.
-        """
         if self.cache_manager is None:
             return await resolve_sku_or_id(identifier, self.bom_service)
-        
-        # Check cache first (only helps for NetSuite fallback results)
+
         cache_key = make_resolution_cache_key(identifier)
-        cached_result = self.cache_manager.get(cache_key)
-        
+        cached_result = await self.cache_manager.get(cache_key)
+
         if cached_result is not None:
-            logger.debug(f"Resolution cache hit for {identifier} → {cached_result}")
+            logger.debug(f"Resolution cache hit for {identifier} -> {cached_result}")
             return cached_result
-        
-        # Call the resolver (it will try local CSV first, then NetSuite)
+
         resolved_id = await resolve_sku_or_id(identifier, self.bom_service)
-        
-        # Only cache if we got a result
-        # This is especially valuable for NetSuite fallback results
+
         if resolved_id:
-            self.cache_manager.set(cache_key, resolved_id)
-            logger.debug(f"Cached resolution: {identifier} → {resolved_id}")
-        
+            await self.cache_manager.set(cache_key, resolved_id)
+            logger.debug(f"Cached resolution: {identifier} -> {resolved_id}")
+
         return resolved_id
 
     async def _get_item_details(self, item_id: str) -> Optional[Dict]:
-        """
-        Get item details with optional caching.
-        Note: BOMService also has caching built-in, so this provides double protection.
-        """
-        # The BOMService.get_item_details already handles caching internally
         return await self.bom_service.get_item_details(item_id)
 
     async def _get_bom(self, item_sku: str) -> List[Dict]:
-        """
-        Get BOM with optional caching.
-        Note: BOMService.get_full_bom already handles caching internally.
-        """
-        # The BOMService.get_full_bom already handles caching internally
         return await self.bom_service.get_full_bom(item_sku)
 
     async def _get_inventory(self, item_ids: List[str], location_name: Optional[str] = None) -> List[Dict]:
-        """
-        Get inventory levels with short-TTL caching (5 min default).
-        This is the main performance optimization - NetSuite inventory queries take 2-4s each.
-        """
         if self.cache_manager is None:
             return await self.inventory_service.get_inventory_levels(item_ids, location_name)
 
         cache_key = make_inventory_cache_key(item_ids, location_name)
-        cached = self.cache_manager.get(cache_key)
+        cached = await self.cache_manager.get(cache_key)
 
         if cached is not None:
             logger.debug(f"Inventory cache HIT for {len(item_ids)} items")
             return cached
 
         result = await self.inventory_service.get_inventory_levels(item_ids, location_name)
-        self.cache_manager.set(cache_key, result)
+        await self.cache_manager.set(cache_key, result)
         logger.debug(f"Cached inventory for {len(item_ids)} items")
         return result
 
@@ -180,24 +135,16 @@ class ProductionService:
         bom_components: Optional[List[Dict]] = None,
         depth: int = 0,
     ) -> Tuple[int, List[Dict], Dict[str, float], Dict[str, Dict], Optional[Dict]]:
-        """
-        Returns: (max_producible, shortages, component_totals, inventory_data, limiting_component_info)
-        component_totals: maps component_id -> total available (inventory + producible)
-        inventory_data: maps component_id -> full inventory record with sku, name, etc.
-        limiting_component_info: dict with info about the component that's actually limiting production
-        """
         start_time = time.time()
         indent = "  " * depth
         logger.info(f"{indent}[TIMING] get_max_producible called for item {item_id}, qty {desired_quantity}, depth {depth}")
 
-        # ALWAYS resolve the identifier - uses cache if available
         resolved_id = await self._resolve_identifier(item_id)
         if not resolved_id:
             logger.warning(f"{indent}Could not resolve item identifier: {item_id}")
             return 0, [{"item_id": item_id, "reason": "Could not resolve item"}], {}, {}, None
         item_id = resolved_id
 
-        # Get item details - uses cache if available (via BOMService)
         item_details = await self._get_item_details(item_id)
         if not item_details:
             logger.warning(f"{indent}Item not found: {item_id}")
@@ -207,7 +154,6 @@ class ProductionService:
 
         is_manufacturing = item_details.get("is_manufacturing") == "true"
 
-        # Parallelize inventory fetch and BOM fetch when BOM is not provided
         if bom_components is None:
             item_sku = item_details.get("itemid", item_id)
             logger.info(f"{indent}Fetching inventory + BOM in parallel for item {item_id} / SKU {item_sku}")
@@ -216,24 +162,21 @@ class ProductionService:
             inventory_levels, bom_components = await asyncio.gather(inventory_task, bom_task)
             logger.info(f"{indent}BOM fetch returned {len(bom_components)} components")
         else:
-            # ALWAYS fetch fresh inventory - NEVER cached
             inventory_levels = await self._get_inventory([item_id], location_name)
 
         inventory_qty = float(inventory_levels[0].get("available_quantity", 0)) if inventory_levels else 0
         logger.info(f"{indent}Inventory quantity for {item_id}: {inventory_qty}")
-        
+
         direct_components = [c for c in bom_components if c.get("level") == 0]
         has_sub_bom = bool(direct_components)
         logger.info(f"{indent}Direct components (level 0): {len(direct_components)}, has_sub_bom: {has_sub_bom}")
 
-        # Handle non-manufacturing items
         if not is_manufacturing:
             logger.info(f"{indent}Item {item_id} is non-manufacturing. Returning inventory units: {int(inventory_qty)}")
             elapsed = time.time() - start_time
             logger.info(f"{indent}[TIMING] get_max_producible for {item_id} at depth {depth} took {elapsed:.3f}s")
             return int(inventory_qty), [], {}, {}, None
 
-        # Manufacturing item but no BOM found
         if not has_sub_bom:
             logger.warning(f"{indent}Item {item_id} is marked as manufacturing but has no BOM components!")
             shortage = [{
@@ -253,26 +196,22 @@ class ProductionService:
         all_shortages = []
         component_totals = {}
         inventory_data = {}
-        
-        # Track the limiting component
+
         limiting_component_info = None
         min_producible = float('inf')
 
         component_skus = list({comp.get("component_sku", "") for comp in direct_components})
-        # Resolve all component SKUs in parallel
         resolution_results = await asyncio.gather(
             *(self._resolve_identifier(sku) for sku in component_skus)
         )
         resolved_ids = [rid for rid in resolution_results if rid]
-        
-        # Fetch FRESH inventory once for all components - NEVER cached
+
         component_inventory_levels = await self._get_inventory(resolved_ids, location_name)
-        
+
         inventory_lookup_by_sku = {inv["item_sku"]: inv for inv in component_inventory_levels}
         inventory_lookup_by_id = {inv["item_id"]: inv for inv in component_inventory_levels if "item_id" in inv}
         sku_to_id = {inv["item_sku"]: inv["item_id"] for inv in component_inventory_levels if "item_id" in inv}
 
-        # Store inventory data for later use (avoid re-fetching)
         for inv in component_inventory_levels:
             if "item_id" in inv:
                 inventory_data[inv["item_id"]] = inv
@@ -301,8 +240,7 @@ class ProductionService:
                 })
                 component_totals[comp_sku] = 0
                 max_quantities.append(0)
-                
-                # This is limiting
+
                 if 0 < min_producible:
                     min_producible = 0
                     limiting_component_info = {
@@ -322,31 +260,26 @@ class ProductionService:
             is_sub_multi_level = comp.get("is_manufacturing") == "true"
 
             if is_sub_multi_level:
-                # Find the index of current component in bom_components
                 current_index = None
                 for idx, c in enumerate(bom_components):
-                    if (c.get("component_sku") == comp_sku and 
+                    if (c.get("component_sku") == comp_sku and
                         c.get("level", 0) == comp.get("level", 0)):
                         current_index = idx
                         break
-                
+
                 if current_index is not None:
-                    # Collect ONLY the immediate children (next items with level = current_level + 1)
-                    # Stop when we hit another item at same or lower level
                     current_level = comp.get("level", 0)
                     sub_components = []
-                    
+
                     for i in range(current_index + 1, len(bom_components)):
                         next_comp = bom_components[i]
                         next_level = next_comp.get("level", 0)
-                        
-                        # If we hit same or lower level, we've left this component's subtree
+
                         if next_level <= current_level:
                             break
-                        
-                        # Add this component to sub_components
+
                         sub_components.append(next_comp)
-                    
+
                     adjusted_sub_components = []
                     for sc in sub_components:
                         adjusted = sc.copy()
@@ -354,12 +287,12 @@ class ProductionService:
                         adjusted_sub_components.append(adjusted)
                 else:
                     adjusted_sub_components = []
-                
+
                 sub_max_qty, sub_shortages, sub_totals, sub_inventory, sub_limiting = await self.get_max_producible_quantity_and_shortages(
                     comp_id, int(math.ceil(required_qty_total)), location_name, adjusted_sub_components, depth + 1
                 )
                 all_shortages.extend(sub_shortages)
-                
+
                 inventory_data.update(sub_inventory)
 
                 component_inv_qty = float(inventory_lookup_by_id.get(comp_id, {}).get("available_quantity", 0))
@@ -377,9 +310,7 @@ class ProductionService:
                     inventory_data[comp_id] = {"available_quantity": total_units}
 
                 max_units_for_parent = safe_floor_div(total_units, required_qty_per_unit)
-                
-                # Track if this is the limiting component
-                # For sub-assemblies, prefer showing them over leaf components
+
                 if max_units_for_parent < min_producible or (max_units_for_parent == min_producible and is_sub_multi_level):
                     min_producible = max_units_for_parent
                     limiting_component_info = {
@@ -389,10 +320,10 @@ class ProductionService:
                         "max_units_possible": max_units_for_parent,
                         "total_available": total_units,
                         "required_per_unit": required_qty_per_unit,
-                        "sub_limiting": sub_limiting,  # Track nested limiting component
+                        "sub_limiting": sub_limiting,
                         "is_assembly": True
                     }
-                
+
                 if total_units < required_qty_total:
                     all_shortages.append({
                         "item_id": comp_id,
@@ -407,16 +338,14 @@ class ProductionService:
 
             else:
                 component_inv_qty = float(inventory_lookup_by_id.get(comp_id, {}).get("available_quantity", 0))
-                
+
                 component_totals[comp_id] = component_inv_qty
-                
+
                 max_units_for_parent = safe_floor_div(component_inv_qty, required_qty_per_unit)
                 logger.info(f"{indent}Leaf component {comp_name}: inventory={component_inv_qty}, "
                             f"required_qty_per_unit={required_qty_per_unit}, required_total={required_qty_total}, "
                             f"max_units_for_parent={max_units_for_parent}")
-                
-                # Track if this is the limiting component
-                # Only update if this component is MORE limiting (not equal)
+
                 if max_units_for_parent < min_producible:
                     min_producible = max_units_for_parent
                     limiting_component_info = {
@@ -428,7 +357,7 @@ class ProductionService:
                         "required_per_unit": required_qty_per_unit,
                         "is_assembly": False
                     }
-                
+
                 if component_inv_qty < required_qty_total:
                     all_shortages.append({
                         "item_id": comp_id,
@@ -454,11 +383,11 @@ class ProductionService:
         logger.info(f"{indent}[TIMING] get_max_producible for {item_id} at depth {depth} took {elapsed:.3f}s")
         logger.info(f"{indent}Returning max producible quantity: {max_producible} for item {item_id} "
                     f"at recursion depth {depth} (desired: {desired_quantity})")
-        
+
         if limiting_component_info:
             logger.info(f"{indent}Limiting component: {limiting_component_info.get('item_name')} "
                        f"(max units: {limiting_component_info.get('max_units_possible')})")
-        
+
         return max_producible, all_shortages, component_totals, inventory_data, limiting_component_info
 
     async def get_production_analysis(
@@ -470,23 +399,19 @@ class ProductionService:
         total_start = time.time()
         logger.info(f"=== [TIMING] Starting production analysis for item {item_identifier}, quantity {desired_quantity} ===")
 
-        # Resolve identifier - uses cache if available
         resolution_start = time.time()
         resolved_id = await self._resolve_identifier(item_identifier)
         logger.info(f"[TIMING] SKU resolution took {time.time() - resolution_start:.3f}s")
-        
-        # ✅ RAISE EXCEPTION instead of returning empty response
+
         if not resolved_id:
             logger.warning(f"Could not resolve item identifier: {item_identifier}")
             raise ValueError(f"Item '{item_identifier}' not found in system")
-        
+
         item_id = resolved_id
         original_identifier = item_identifier
 
-        # Get item details - uses cache if available
         item_details = await self._get_item_details(item_id)
-        
-        # ✅ RAISE EXCEPTION instead of returning empty response
+
         if not item_details:
             logger.warning(f"Item details not found for ID: {item_id}")
             raise ValueError(f"Item '{item_identifier}' not found in system")
@@ -509,14 +434,11 @@ class ProductionService:
                 "location_name": location_name
             }
 
-        # Let the calculation function fetch BOM + inventory in parallel
-        # by passing bom_components=None
         calc_start = time.time()
         max_producible_quantity, shortages, component_totals, inventory_data, limiting_info = await self.get_max_producible_quantity_and_shortages(
             item_id, desired_quantity, location_name, None
         )
 
-        # Now fetch BOM for the response formatting (will be cached from the calc call)
         bom_components = await self._get_bom(item_sku)
 
         if not bom_components:
@@ -538,8 +460,7 @@ class ProductionService:
         logger.info(f"[TIMING] Production calculation took {time.time() - calc_start:.3f}s")
 
         can_produce = max_producible_quantity >= desired_quantity
-        
-        # Extract limiting component name from the tracked info
+
         limiting_component = limiting_info.get("item_name") if limiting_info else None
 
         formatted_bom = []
@@ -553,9 +474,6 @@ class ProductionService:
                 "level": comp.get("level", 0)
             })
 
-        # Build sku_to_id mapping from BOM components (includes all levels)
-        # This ensures we can look up IDs for sub-assemblies at any depth
-        # Build sku_to_id mapping from BOM components (includes all levels)
         sku_to_id = {}
         for comp in bom_components:
             comp_sku = comp.get("component_sku", "")
@@ -563,14 +481,12 @@ class ProductionService:
             if comp_sku and comp_id:
                 sku_to_id[comp_sku] = comp_id
 
-        # Also add from inventory_data as fallback
         for comp_id, inv_data in inventory_data.items():
             if "item_sku" in inv_data:
                 comp_sku = inv_data["item_sku"]
                 if comp_sku not in sku_to_id:
                     sku_to_id[comp_sku] = comp_id
 
-        # PRE-RESOLVE all component IDs that aren't in sku_to_id yet (in parallel)
         unique_skus = [sku for sku in set(comp.get("component_sku", "") for comp in bom_components) if sku and sku not in sku_to_id]
         if unique_skus:
             resolved_results = await asyncio.gather(
@@ -587,8 +503,7 @@ class ProductionService:
             unit = comp.get("unit")
             required_qty_per_unit = float(comp.get("quantity_required", 0))
             required_qty_total = required_qty_per_unit * desired_quantity
-            
-            # NOW this will always match what was used in the calculation phase
+
             comp_id = sku_to_id.get(comp_sku, comp_sku)
 
             if comp_sku == self.water_sku or comp_id == self.water_id:
@@ -609,10 +524,9 @@ class ProductionService:
 
             inv_record = inventory_data.get(comp_id, {})
             raw_inventory = float(inv_record.get("available_quantity", 0))
-            
-            # NOW this lookup will work correctly for B!
+
             total_available = component_totals.get(comp_id, raw_inventory)
-            
+
             if total_available == math.inf:
                 sufficient = True
                 max_units_possible = math.inf
@@ -648,54 +562,42 @@ class ProductionService:
             "shortages": shortages,
             "location_name": location_name
         }
-    
+
     # Cache management methods
-    
-    def invalidate_item_cache(self, item_id: str, item_sku: Optional[str] = None) -> None:
-        """Invalidate all cached data for a specific item (including inventory)"""
+
+    async def invalidate_item_cache(self, item_id: str, item_sku: Optional[str] = None) -> None:
+        """Invalidate all cached data for a specific item."""
         if self.cache_manager is None:
             logger.warning("Cache is not enabled")
             return
 
         details_key = make_item_details_cache_key(item_id)
-        self.cache_manager.invalidate(details_key)
+        await self.cache_manager.invalidate(details_key)
 
-        # Invalidate any inventory cache entries containing this item
-        self.cache_manager.invalidate_pattern(f"inventory:{item_id}")
+        await self.cache_manager.invalidate_pattern(f"inventory:{item_id}")
 
         if item_sku:
             bom_key = make_bom_cache_key(item_sku)
-            self.cache_manager.invalidate(bom_key)
+            await self.cache_manager.invalidate(bom_key)
             logger.info(f"Invalidated cache for item {item_id} (SKU: {item_sku})")
         else:
             logger.info(f"Invalidated item details cache for item {item_id}")
-    
-    def invalidate_all_boms(self) -> int:
-        """Invalidate all cached BOMs"""
+
+    async def invalidate_all_boms(self) -> int:
         if self.cache_manager is None:
             return 0
-        return self.cache_manager.invalidate_pattern('bom:')
-    
-    def invalidate_all_item_details(self) -> int:
-        """Invalidate all cached item details"""
+        return await self.cache_manager.invalidate_pattern('bom:')
+
+    async def invalidate_all_item_details(self) -> int:
         if self.cache_manager is None:
             return 0
-        return self.cache_manager.invalidate_pattern('item_details:')
-    
-    def clear_all_caches(self) -> None:
-        """Clear all caches"""
+        return await self.cache_manager.invalidate_pattern('item_details:')
+
+    async def clear_all_caches(self) -> None:
         if self.cache_manager:
-            self.cache_manager.clear()
-    
-    def get_cache_stats(self) -> Dict:
-        """Get cache statistics"""
+            await self.cache_manager.clear()
+
+    async def get_cache_stats(self) -> Dict:
         if self.cache_manager:
-            return self.cache_manager.get_stats()
+            return await self.cache_manager.get_stats()
         return {}
-    
-    def print_cache_stats(self) -> None:
-        """Print cache statistics"""
-        if self.cache_manager:
-            self.cache_manager.print_stats()
-        else:
-            print("Caching is not enabled")

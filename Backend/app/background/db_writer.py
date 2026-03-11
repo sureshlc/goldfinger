@@ -1,6 +1,7 @@
 """
 Background DB Writer Service
 Handles async batch writing of logs to PostgreSQL using AsyncIO queue.
+Includes metrics tracking and retry on failure.
 """
 import asyncio
 from typing import Dict, Any, Optional
@@ -20,6 +21,11 @@ BATCH_SIZE = 50
 BATCH_TIMEOUT = 5.0
 QUEUE_MAX_SIZE = 10000
 
+# Metrics counters
+_dropped_events: int = 0
+_total_enqueued: int = 0
+_failed_writes: int = 0
+
 
 class LogEvent:
     def __init__(self, event_type: str, data: Dict[str, Any]):
@@ -36,59 +42,77 @@ def init_log_queue():
 
 
 async def enqueue_log(event_type: str, data: Dict[str, Any]) -> bool:
-    global log_queue
+    global log_queue, _dropped_events, _total_enqueued
     if log_queue is None:
         logger.warning("Log queue not initialized, initializing now")
         init_log_queue()
     try:
         event = LogEvent(event_type, data)
         log_queue.put_nowait(event)
+        _total_enqueued += 1
         return True
     except asyncio.QueueFull:
-        logger.error(f"Log queue full! Dropping {event_type} event")
+        _dropped_events += 1
+        logger.error(f"Log queue full! Dropping {event_type} event (total dropped: {_dropped_events})")
         return False
     except Exception as e:
         logger.error(f"Failed to enqueue log: {e}")
         return False
 
 
-async def _write_to_db(event_type: str, data: dict):
-    """Write a single event to database."""
-    try:
-        from app.database.connection import get_session_factory
-        from app.database.repositories.log_repo import (
-            insert_request_log,
-            insert_session_log,
-            update_session_log,
-        )
+async def _write_to_db(event_type: str, data: dict, max_attempts: int = 2):
+    """Write a single event to database with retry."""
+    global _failed_writes
+    for attempt in range(max_attempts):
+        try:
+            from app.database.connection import get_session_factory
+            from app.database.repositories.log_repo import (
+                insert_request_log,
+                insert_session_log,
+                update_session_log,
+            )
 
-        factory = get_session_factory()
-        async with factory() as session:
-            if event_type == "request":
-                await insert_request_log(session, data)
-            elif event_type == "session":
-                if data.get("status") == "completed":
-                    await update_session_log(session, data["session_id"], data)
-                else:
-                    await insert_session_log(session, data)
-            await session.commit()
-    except Exception as e:
-        logger.error(f"Failed to write {event_type} to DB: {e}")
+            factory = get_session_factory()
+            async with factory() as session:
+                if event_type == "request":
+                    await insert_request_log(session, data)
+                elif event_type == "session":
+                    if data.get("status") == "completed":
+                        await update_session_log(session, data["session_id"], data)
+                    else:
+                        await insert_session_log(session, data)
+                await session.commit()
+            return  # success
+        except Exception as e:
+            if attempt < max_attempts - 1:
+                logger.warning(f"Failed to write {event_type} to DB (attempt {attempt + 1}), retrying: {e}")
+                await asyncio.sleep(0.5)
+            else:
+                _failed_writes += 1
+                logger.error(f"Failed to write {event_type} to DB after {max_attempts} attempts: {e}")
 
 
-async def _batch_write_requests(requests_data: list):
-    """Batch write request logs to database."""
-    try:
-        from app.database.connection import get_session_factory
-        from app.database.repositories.log_repo import batch_insert_request_logs
+async def _batch_write_requests(requests_data: list, max_attempts: int = 2):
+    """Batch write request logs to database with retry."""
+    global _failed_writes
+    for attempt in range(max_attempts):
+        try:
+            from app.database.connection import get_session_factory
+            from app.database.repositories.log_repo import batch_insert_request_logs
 
-        factory = get_session_factory()
-        async with factory() as session:
-            count = await batch_insert_request_logs(session, requests_data)
-            await session.commit()
-            logger.debug(f"Batch wrote {count} requests to DB")
-    except Exception as e:
-        logger.error(f"Failed to batch write requests to DB: {e}")
+            factory = get_session_factory()
+            async with factory() as session:
+                count = await batch_insert_request_logs(session, requests_data)
+                await session.commit()
+                logger.debug(f"Batch wrote {count} requests to DB")
+            return  # success
+        except Exception as e:
+            if attempt < max_attempts - 1:
+                logger.warning(f"Failed to batch write requests to DB (attempt {attempt + 1}), retrying: {e}")
+                await asyncio.sleep(0.5)
+            else:
+                _failed_writes += 1
+                logger.error(f"Failed to batch write requests to DB after {max_attempts} attempts: {e}")
 
 
 async def db_writer_worker():
@@ -103,7 +127,6 @@ async def db_writer_worker():
                 event = await asyncio.wait_for(log_queue.get(), timeout=1.0)
 
                 if event.event_type == "user":
-                    # User events are handled by session service, skip
                     pass
                 elif event.event_type == "session":
                     await _write_to_db("session", event.data)
@@ -191,6 +214,9 @@ async def get_queue_stats() -> Dict[str, Any]:
         "queue_size": log_queue.qsize(),
         "queue_max_size": QUEUE_MAX_SIZE,
         "worker_running": _worker_task is not None and not _worker_task.done(),
+        "total_enqueued": _total_enqueued,
+        "dropped_events": _dropped_events,
+        "failed_writes": _failed_writes,
     }
 
 

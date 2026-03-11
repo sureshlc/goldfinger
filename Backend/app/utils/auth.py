@@ -53,6 +53,18 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Verify a password against a hash"""
     return pwd_context.verify(plain_password, hashed_password)
 
+
+_password_executor = __import__('concurrent.futures', fromlist=['ThreadPoolExecutor']).ThreadPoolExecutor(max_workers=4)
+
+
+async def verify_password_async(plain_password: str, hashed_password: str) -> bool:
+    """Verify a password asynchronously (runs Argon2 in thread pool to avoid blocking event loop)."""
+    import asyncio
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        _password_executor, pwd_context.verify, plain_password, hashed_password
+    )
+
 def get_password_hash(password: str) -> str:
     """Hash a password"""
     return pwd_context.hash(password)
