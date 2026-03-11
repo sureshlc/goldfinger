@@ -1,0 +1,304 @@
+from fastapi import APIRouter, HTTPException, Query, Depends, Request
+from typing import Optional, List
+import logging
+import time
+from pydantic import BaseModel, ConfigDict
+from app.services.production_service import ProductionService
+from app.services.bom_service import BOMService
+from app.services.netsuite_service import NetSuiteService
+from app.utils.suiteql_sanitizer import validate_suiteql_identifier
+from app.dependencies.auth import get_current_user, get_admin_user
+from app.models.user import User
+
+logger = logging.getLogger(__name__)
+router = APIRouter()
+
+# ============================================================================
+# SINGLETON INSTANCES - Created once, reused forever
+# This allows cache to persist across requests!
+# ============================================================================
+_netsuite_service = NetSuiteService()
+_production_service = ProductionService(
+    netsuite_service=_netsuite_service,
+    enable_cache=True,
+    bom_ttl_seconds=3600,       # 1 hour cache for BOMs
+    item_details_ttl_seconds=3600,  # 1 hour cache for item details
+    inventory_ttl_seconds=300    # 5 minute cache for inventory
+)
+_bom_service = BOMService(_netsuite_service, _production_service.cache_manager)
+
+logger.info("Production service initialized with caching enabled")
+
+
+def get_production_service():
+    """Return the singleton production service instance"""
+    return _production_service
+
+
+def get_bom_service():
+    """Return the singleton BOM service instance"""
+    return _bom_service
+
+
+class BOMComponent(BaseModel):
+    item_id: str
+    item_name: str
+    item_sku: str
+    quantity_required: float
+    unit: str
+    level: int
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ProductionAnalysisResponse(BaseModel):
+    item_id: str
+    item_name: str
+    item_sku: str
+    can_produce: bool
+    max_quantity_producible: int
+    limiting_component: Optional[str]
+    bom_components: List[BOMComponent]
+    component_availability: list
+    shortages: list
+    location_name: Optional[str]
+
+
+@router.get("/feasibility/{item_identifier}", response_model=ProductionAnalysisResponse)
+async def get_production_feasibility(
+    request: Request,
+    item_identifier: str,
+    desired_quantity: int = Query(1, ge=1, description="Desired quantity to produce"),
+    current_user: User = Depends(get_current_user),
+    location_name: Optional[str] = None,
+    production_service: ProductionService = Depends(get_production_service),
+):
+    try:
+        validate_suiteql_identifier(item_identifier, "item_identifier")
+        if location_name:
+            validate_suiteql_identifier(location_name, "location_name")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    request_start = time.time()
+    try:
+        logger.info(f"[ROUTER] Checking production feasibility for {item_identifier}, quantity {desired_quantity}")
+
+        # Pass item_identifier directly - let the service handle resolution
+        analysis = await production_service.get_production_analysis(item_identifier, desired_quantity, location_name)
+        
+        # Attach production data to request state for logging middleware
+        request.state.production_data = {
+            "item_sku": analysis.get("item_sku", ""),
+            "desired_quantity": str(desired_quantity),
+            "max_producible": str(analysis.get("max_quantity_producible", "")),
+            "can_produce": str(analysis.get("can_produce", "")),
+            "limiting_component": analysis.get("limiting_component", ""),
+            "shortages_count": str(len(analysis.get("shortages", [])))
+        }
+
+        logger.debug(f"🔍 ROUTER DEBUG: Attached production_data to request.state: {request.state.production_data}")
+        
+        elapsed = time.time() - request_start
+        logger.info(f"[ROUTER] Total request took {elapsed:.3f}s")
+        
+        return analysis
+    
+    except ValueError as e:
+        # ✅ Attach production data even for 404 errors (for logging)
+        request.state.production_data = {
+            "item_sku": item_identifier,
+            "desired_quantity": str(desired_quantity),
+            "max_producible": "0",
+            "can_produce": "False",
+            "limiting_component": "Item not found",
+            "shortages_count": "0"
+        }
+        logger.warning(f"Item not found: {e}")
+        raise HTTPException(status_code=404, detail=str(e))
+    
+    except HTTPException:
+        raise
+    
+    except Exception as e:
+        logger.error(f"Error checking production feasibility: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to check production feasibility")
+
+
+@router.get("/capacity/{item_identifier}")
+async def get_production_capacity(
+    request: Request,
+    item_identifier: str,
+    location_name: Optional[str] = None,
+    current_user: User = Depends(get_current_user),
+    production_service: ProductionService = Depends(get_production_service),
+):
+    try:
+        validate_suiteql_identifier(item_identifier, "item_identifier")
+        if location_name:
+            validate_suiteql_identifier(location_name, "location_name")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    request_start = time.time()
+    try:
+        logger.info(f"[ROUTER] Getting production capacity for {item_identifier}")
+        
+        analysis = await production_service.get_production_analysis(item_identifier, 1, location_name)
+        
+        # Attach production data to request state for logging middleware
+        request.state.production_data = {
+            "item_sku": analysis.get("item_sku", ""),
+            "desired_quantity": "1",
+            "max_producible": str(analysis.get("max_quantity_producible", "")),
+            "can_produce": str(analysis.get("max_quantity_producible", 0) > 0),
+            "limiting_component": analysis.get("limiting_component", ""),
+            "shortages_count": "0"
+        }
+        
+        elapsed = time.time() - request_start
+        logger.info(f"[ROUTER] Capacity request took {elapsed:.3f}s")
+        
+        return {
+            "item_id": analysis.get("item_id"),
+            "item_name": analysis.get("item_name"),
+            "item_sku": analysis.get("item_sku"),
+            "max_quantity_producible": analysis.get("max_quantity_producible", 0),
+            "limiting_component": analysis.get("limiting_component"),
+            "can_produce": analysis.get("max_quantity_producible", 0) > 0,
+            "location_name": location_name,
+        }
+    
+    except ValueError as e:
+        # ✅ Attach production data even for 404 errors (for logging)
+        request.state.production_data = {
+            "item_sku": item_identifier,
+            "desired_quantity": "1",
+            "max_producible": "0",
+            "can_produce": "False",
+            "limiting_component": "Item not found",
+            "shortages_count": "0"
+        }
+        logger.warning(f"Item not found: {e}")
+        raise HTTPException(status_code=404, detail=str(e))
+    
+    except HTTPException:
+        raise
+    
+    except Exception as e:
+        logger.error(f"Error getting production capacity: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to get production capacity")
+
+
+@router.get("/shortages/{item_identifier}")
+async def get_production_shortages(
+    request: Request,
+    item_identifier: str,
+    desired_quantity: int = Query(1, ge=1, description="Desired quantity to produce"),
+    current_user: User = Depends(get_current_user),
+    location_name: Optional[str] = None,
+    production_service: ProductionService = Depends(get_production_service),
+):
+    try:
+        validate_suiteql_identifier(item_identifier, "item_identifier")
+        if location_name:
+            validate_suiteql_identifier(location_name, "location_name")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    request_start = time.time()
+    try:
+        logger.info(f"[ROUTER] Getting production shortages for {item_identifier}, quantity {desired_quantity}")
+        
+        analysis = await production_service.get_production_analysis(item_identifier, desired_quantity, location_name)
+        
+        # Attach production data to request state for logging middleware
+        request.state.production_data = {
+            "item_sku": analysis.get("item_sku", ""),
+            "desired_quantity": str(desired_quantity),
+            "max_producible": str(analysis.get("max_quantity_producible", "")),
+            "can_produce": str(analysis.get("can_produce", "")),
+            "limiting_component": analysis.get("limiting_component", ""),
+            "shortages_count": str(len(analysis.get("shortages", [])))
+        }
+        
+        elapsed = time.time() - request_start
+        logger.info(f"[ROUTER] Shortages request took {elapsed:.3f}s")
+        
+        return {
+            "item_id": analysis.get("item_id"),
+            "item_name": analysis.get("item_name"),
+            "item_sku": analysis.get("item_sku"),
+            "desired_quantity": desired_quantity,
+            "can_produce": analysis.get("can_produce", False),
+            "shortages": analysis.get("shortages", []),
+            "total_shortages": len(analysis.get("shortages", [])),
+            "location_name": location_name,
+        }
+    
+    except ValueError as e:
+        # ✅ Convert ValueError (item not found) to 404 HTTPException
+        logger.warning(f"Item not found: {e}")
+        raise HTTPException(status_code=404, detail=str(e))
+    
+    except HTTPException:
+        raise
+    
+    except Exception as e:
+        logger.error(f"Error getting production shortages: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to get production shortages")
+
+
+# ============================================================================
+# CACHE MANAGEMENT ENDPOINTS (Optional - for monitoring/debugging)
+# ============================================================================
+
+@router.get("/cache/stats")
+async def get_cache_stats(
+    current_user: User = Depends(get_admin_user),
+    production_service: ProductionService = Depends(get_production_service),
+):
+    """Get cache statistics to monitor performance"""
+    try:
+        stats = production_service.get_cache_stats()
+        return {
+            "cache_enabled": production_service.cache_manager is not None,
+            "statistics": stats
+        }
+    except Exception as e:
+        logger.error(f"Error getting cache stats: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to get cache stats")
+
+
+@router.post("/cache/invalidate/{item_id}")
+async def invalidate_item_cache(
+    item_id: str,
+    item_sku: Optional[str] = None,
+    current_user: User = Depends(get_admin_user),
+    production_service: ProductionService = Depends(get_production_service),
+):
+    """Invalidate cache for a specific item (use when BOM changes)"""
+    try:
+        production_service.invalidate_item_cache(item_id, item_sku)
+        return {
+            "message": f"Cache invalidated for item {item_id}",
+            "item_id": item_id,
+            "item_sku": item_sku
+        }
+    except Exception as e:
+        logger.error(f"Error invalidating cache: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to invalidate cache")
+
+
+@router.post("/cache/clear")
+async def clear_all_caches(
+    current_user: User = Depends(get_admin_user),
+    production_service: ProductionService = Depends(get_production_service),
+):
+    """Clear all caches (use sparingly)"""
+    try:
+        production_service.clear_all_caches()
+        return {"message": "All caches cleared successfully"}
+    except Exception as e:
+        logger.error(f"Error clearing caches: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to clear caches")
