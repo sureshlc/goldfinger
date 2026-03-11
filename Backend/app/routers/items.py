@@ -1,9 +1,8 @@
-import csv
 from fastapi import APIRouter, HTTPException, Depends, Query
 from typing import List, Optional
 from pydantic import BaseModel
 from app.services.bom_service import BOMService
-from app.services.netsuite_service import NetSuiteService
+from app.services.service_registry import get_bom_service
 from app.utils.identifier_resolution import resolve_sku_or_id
 from app.utils.suiteql_sanitizer import validate_suiteql_identifier
 import logging
@@ -39,11 +38,6 @@ class BOMResponse(BaseModel):
     total_components: int
 
 
-async def get_bom_service():
-    netsuite_service = NetSuiteService()
-    return BOMService(netsuite_service)
-
-
 @router.get("/sku/{item_sku}", response_model=ItemDetailsResponse, summary="Get detailed item information by SKU")
 async def get_item_details_by_sku(
     item_sku: str,
@@ -58,13 +52,13 @@ async def get_item_details_by_sku(
     logger.info(f"Getting item details for SKU: {item_sku}")
     item_id = await resolve_sku_or_id(item_sku, bom_service)
     logger.debug(f"Resolved SKU {item_sku} to ID: {item_id}")
-    
+
     if not item_id:
         raise HTTPException(status_code=404, detail="Item not found for SKU")
-    
+
     item = await bom_service.get_item_details(item_id)
     logger.debug(f"NetSuite returned item details: {item}")
-    
+
     if not item:
         raise HTTPException(status_code=404, detail="Item details not found in NetSuite")
     return ItemDetailsResponse(

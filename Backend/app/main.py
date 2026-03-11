@@ -1,6 +1,7 @@
 """
 Main FastAPI Application with PostgreSQL + Integrated Logging System
 """
+import asyncio
 from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
@@ -11,6 +12,7 @@ import sys
 
 from app.dependencies.auth import get_current_user, get_admin_user
 from app.database.connection import init_db, close_db
+from app.services.netsuite_service import NetSuiteService
 
 # Import logging components
 from app.utils.csv_logger import get_csv_logger
@@ -42,12 +44,16 @@ def setup_logging():
 
 logger = setup_logging()
 
+# Background cleanup task reference
+_cleanup_task = None
+
 # ============================================================================
 # APPLICATION LIFECYCLE
 # ============================================================================
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _cleanup_task
     try:
         validate_settings()
 
@@ -60,6 +66,10 @@ async def lifespan(app: FastAPI):
         logger.info("Initializing database connection...")
         await init_db()
         logger.info("Database connection established")
+
+        # Initialize NetSuite HTTP client
+        await NetSuiteService.startup()
+        logger.info("NetSuite HTTP client initialized")
 
         # Initialize CSV logger (DB-backed now)
         get_csv_logger()
@@ -79,6 +89,21 @@ async def lifespan(app: FastAPI):
         await resolver.load_from_db()
         logger.info("Local SKU resolver loaded from database")
 
+        # Start periodic session cleanup task
+        async def _periodic_session_cleanup():
+            while True:
+                try:
+                    await asyncio.sleep(300)  # every 5 minutes
+                    session_service = get_session_service()
+                    session_service.cleanup_expired_sessions()
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    logger.error(f"Session cleanup error: {e}")
+
+        _cleanup_task = asyncio.create_task(_periodic_session_cleanup())
+        logger.info("Periodic session cleanup task started (every 5 min)")
+
         logger.info("All systems initialized successfully")
 
         yield
@@ -86,12 +111,25 @@ async def lifespan(app: FastAPI):
     finally:
         logger.info("Application shutting down")
 
+        # Cancel session cleanup task
+        if _cleanup_task is not None:
+            _cleanup_task.cancel()
+            try:
+                await _cleanup_task
+            except asyncio.CancelledError:
+                pass
+            logger.info("Session cleanup task cancelled")
+
         await stop_db_writer()
         logger.info("Background DB writer stopped")
 
         session_service = get_session_service()
         session_service.shutdown()
         logger.info("Session service shut down")
+
+        # Shutdown NetSuite HTTP client
+        await NetSuiteService.shutdown()
+        logger.info("NetSuite HTTP client closed")
 
         await close_db()
         logger.info("Database connection closed")
@@ -173,6 +211,9 @@ async def logging_stats(current_user=Depends(get_admin_user)):
     session_stats = session_service.get_stats()
     queue_stats = await get_queue_stats()
 
+    # Include NetSuite metrics
+    netsuite_metrics = NetSuiteService.get_metrics()
+
     try:
         factory = get_session_factory()
         async with factory() as session:
@@ -184,6 +225,7 @@ async def logging_stats(current_user=Depends(get_admin_user)):
         "database_logging": db_stats,
         "sessions": session_stats,
         "queue": queue_stats,
+        "netsuite": netsuite_metrics,
         "log_level": settings.log_level,
         "environment": settings.environment,
     }
