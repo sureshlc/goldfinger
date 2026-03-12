@@ -205,6 +205,11 @@ async def update_profile(
                     status_code=400,
                     detail="Current password is incorrect",
                 )
+            if verify_password(body.new_password, db_user.hashed_password):
+                raise HTTPException(
+                    status_code=400,
+                    detail="New password cannot be the same as your current password",
+                )
             _validate_password_strength(body.new_password)
             updates["password"] = body.new_password
 

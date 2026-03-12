@@ -6,9 +6,9 @@ import { ArrowLeft, User, Mail, Shield, Eye, EyeOff, Check, X as XIcon } from "l
 import { useAuth } from "../contexts/AuthContext";
 import { fetchWithAuth, API_BASE_URL } from "../services/auth";
 
-function usePasswordValidation(password: string, confirmPassword: string) {
+function usePasswordValidation(password: string, confirmPassword: string, currentPassword: string) {
   return useMemo(() => {
-    if (!password) return { rules: [], mismatch: false, allPassed: true };
+    if (!password) return { rules: [], mismatch: false, sameAsCurrent: false, allPassed: true };
     const rules = [
       { label: "At least 8 characters", passed: password.length >= 8 },
       { label: "One uppercase letter", passed: /[A-Z]/.test(password) },
@@ -16,8 +16,9 @@ function usePasswordValidation(password: string, confirmPassword: string) {
       { label: "One special character", passed: /[^A-Za-z0-9]/.test(password) },
     ];
     const mismatch = confirmPassword.length > 0 && password !== confirmPassword;
-    return { rules, mismatch, allPassed: rules.every((r) => r.passed) && !mismatch };
-  }, [password, confirmPassword]);
+    const sameAsCurrent = currentPassword.length > 0 && password === currentPassword;
+    return { rules, mismatch, sameAsCurrent, allPassed: rules.every((r) => r.passed) && !mismatch && !sameAsCurrent };
+  }, [password, confirmPassword, currentPassword]);
 }
 
 export default function ProfilePage() {
@@ -31,7 +32,7 @@ export default function ProfilePage() {
   const [showCurrentPassword, setShowCurrentPassword] = useState(false);
   const [showNewPassword, setShowNewPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
-  const pwValidation = usePasswordValidation(newPassword, confirmPassword);
+  const pwValidation = usePasswordValidation(newPassword, confirmPassword, currentPassword);
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -218,6 +219,12 @@ export default function ProfilePage() {
                           {rule.label}
                         </li>
                       ))}
+                      {pwValidation.sameAsCurrent && (
+                        <li className="flex items-center gap-1.5 text-xs text-red-500">
+                          <XIcon className="w-3 h-3" />
+                          Must be different from current password
+                        </li>
+                      )}
                     </ul>
                   )}
                 </div>
