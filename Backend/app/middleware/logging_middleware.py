@@ -152,23 +152,11 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         if request.method == "OPTIONS":
             return True
         
-        # Skip health checks, auth, and internal API calls
-        skip_paths = [
-            "/health",
-            "/docs",
-            "/redoc",
-            "/openapi.json",
-            "/favicon.ico",
-            "/static/",
-            "/api/v1/auth/login",  # Skip login endpoint
-            "/api/v1/auth/logout",  # Skip logout endpoint
-            "/api/v1/auth/me",  # Skip me endpoint
-            "/api/v1/items/",  # Skip items endpoints (internal calls)
-            "/api/v1/inventory/",  # Skip inventory endpoints (internal calls)
-        ]
-        
+        # Only log production feasibility checks — skip everything else
         path = request.url.path
-        return any(path.startswith(skip) for skip in skip_paths)
+        if "/api/v1/production/" in path:
+            return False
+        return True
     
     async def _extract_request_data(
         self,

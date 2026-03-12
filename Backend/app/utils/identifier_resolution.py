@@ -53,7 +53,14 @@ async def resolve_sku_or_id(identifier: str, bom_service) -> Optional[str]:
 
     if netsuite_id:
         logger.info(f"Resolved {identifier} -> {netsuite_id} from NetSuite")
-        # Save to DB for future lookups
-        await local_resolver.save_item(netsuite_id, identifier)
+        # Fetch item details to get description before saving
+        item_name = None
+        try:
+            item_details = await bom_service.get_item_details(netsuite_id)
+            if item_details:
+                item_name = item_details.get("description") or item_details.get("displayname") or ""
+        except Exception as e:
+            logger.warning(f"Could not fetch details for {netsuite_id}: {e}")
+        await local_resolver.save_item(netsuite_id, identifier, item_name)
 
     return netsuite_id

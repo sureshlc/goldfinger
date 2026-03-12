@@ -61,12 +61,38 @@ async def get_item_details_by_sku(
 
     if not item:
         raise HTTPException(status_code=404, detail="Item details not found in NetSuite")
+
+    # Clean description: strip SKU prefix if description starts with the SKU
+    raw_name = item.get("displayname") or ""
+    raw_desc = item.get("description") or ""
+    item_sku = item.get("itemid") or item_sku
+
+    def strip_sku_prefix(text: str, sku: str) -> str:
+        """Remove SKU prefix from text if present (e.g. 'SKU123 - Description' -> 'Description')."""
+        if not text or not sku:
+            return text
+        stripped = text.strip()
+        sku_upper = sku.upper()
+        stripped_upper = stripped.upper()
+        if stripped_upper.startswith(sku_upper):
+            remainder = stripped[len(sku):]
+            # Remove common separators after SKU: " - ", " : ", " ", etc.
+            remainder = remainder.lstrip(" -:").strip()
+            return remainder if remainder else stripped
+        return stripped
+
+    clean_name = strip_sku_prefix(raw_name, item_sku)
+    clean_desc = strip_sku_prefix(raw_desc, item_sku)
+    # If cleaned name is same as SKU, prefer description
+    if clean_name.upper() == item_sku.upper() and clean_desc:
+        clean_name = clean_desc
+
     return ItemDetailsResponse(
         id=item["id"],
-        name=item["displayname"],
-        sku=item["itemid"],
+        name=clean_name,
+        sku=item_sku,
         item_type=item["itemtype"],
-        description=item.get("description", ""),
+        description=clean_desc,
         is_manufacturing=item["is_manufacturing"] == "true"
     )
 

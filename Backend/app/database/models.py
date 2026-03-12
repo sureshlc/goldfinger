@@ -82,3 +82,20 @@ class RequestLogDB(Base):
         Index("ix_request_logs_timestamp", "timestamp"),
         Index("ix_request_logs_user_id", "user_id"),
     )
+
+
+class AuditEventDB(Base):
+    __tablename__ = "audit_events"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    timestamp = Column(DateTime(timezone=True), server_default=func.now())
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    action = Column(String(100), nullable=False)
+    details = Column(Text, nullable=True)
+
+    user = relationship("UserDB")
+
+    __table_args__ = (
+        Index("ix_audit_events_timestamp", "timestamp"),
+        Index("ix_audit_events_action", "action"),
+    )

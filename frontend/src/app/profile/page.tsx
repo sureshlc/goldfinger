@@ -1,10 +1,24 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useMemo } from "react";
 import Link from "next/link";
-import { ArrowLeft, User, Mail, Shield } from "lucide-react";
+import { ArrowLeft, User, Mail, Shield, Eye, EyeOff, Check, X as XIcon } from "lucide-react";
 import { useAuth } from "../contexts/AuthContext";
 import { fetchWithAuth, API_BASE_URL } from "../services/auth";
+
+function usePasswordValidation(password: string, confirmPassword: string) {
+  return useMemo(() => {
+    if (!password) return { rules: [], mismatch: false, allPassed: true };
+    const rules = [
+      { label: "At least 8 characters", passed: password.length >= 8 },
+      { label: "One uppercase letter", passed: /[A-Z]/.test(password) },
+      { label: "One digit", passed: /\d/.test(password) },
+      { label: "One special character", passed: /[^A-Za-z0-9]/.test(password) },
+    ];
+    const mismatch = confirmPassword.length > 0 && password !== confirmPassword;
+    return { rules, mismatch, allPassed: rules.every((r) => r.passed) && !mismatch };
+  }, [password, confirmPassword]);
+}
 
 export default function ProfilePage() {
   const { user } = useAuth();
@@ -14,6 +28,10 @@ export default function ProfilePage() {
   const [confirmPassword, setConfirmPassword] = useState("");
   const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const [saving, setSaving] = useState(false);
+  const [showCurrentPassword, setShowCurrentPassword] = useState(false);
+  const [showNewPassword, setShowNewPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+  const pwValidation = usePasswordValidation(newPassword, confirmPassword);
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -86,18 +104,6 @@ export default function ProfilePage() {
         </Link>
         <h1 className="text-2xl font-bold text-gray-900 mb-6">Profile Settings</h1>
 
-        {message && (
-          <div
-            className={`mb-6 p-4 rounded-lg text-sm flex items-center gap-2 ${
-              message.type === "success"
-                ? "bg-green-50 text-green-800 border border-green-200"
-                : "bg-red-50 text-red-800 border border-red-200"
-            }`}
-          >
-            {message.text}
-          </div>
-        )}
-
         {/* Profile Header */}
         <div className="bg-white rounded-xl shadow border border-gray-200 p-6 mb-6">
           <div className="flex items-center gap-4">
@@ -164,36 +170,97 @@ export default function ProfilePage() {
             <div className="p-6 space-y-4">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Current Password</label>
-                <input
-                  type="password"
-                  value={currentPassword}
-                  onChange={(e) => setCurrentPassword(e.target.value)}
-                  placeholder="Enter your current password"
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                />
+                <div className="relative">
+                  <input
+                    type={showCurrentPassword ? "text" : "password"}
+                    value={currentPassword}
+                    onChange={(e) => setCurrentPassword(e.target.value)}
+                    placeholder="Enter your current password"
+                    className="w-full border border-gray-300 rounded-lg px-3 py-2 pr-10 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowCurrentPassword(!showCurrentPassword)}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                    tabIndex={-1}
+                  >
+                    {showCurrentPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">New Password</label>
-                  <input
-                    type="password"
-                    value={newPassword}
-                    onChange={(e) => setNewPassword(e.target.value)}
-                    placeholder="Min. 8 characters"
-                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  />
+                  <div className="relative">
+                    <input
+                      type={showNewPassword ? "text" : "password"}
+                      value={newPassword}
+                      onChange={(e) => setNewPassword(e.target.value)}
+                      placeholder="Min. 8 characters"
+                      className={`w-full border rounded-lg px-3 py-2 pr-10 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+                        newPassword && !pwValidation.allPassed ? "border-red-300" : "border-gray-300"
+                      }`}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowNewPassword(!showNewPassword)}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                      tabIndex={-1}
+                    >
+                      {showNewPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                  </div>
+                  {newPassword && (
+                    <ul className="mt-1.5 space-y-0.5">
+                      {pwValidation.rules.map((rule) => (
+                        <li key={rule.label} className={`flex items-center gap-1.5 text-xs ${rule.passed ? "text-green-600" : "text-red-500"}`}>
+                          {rule.passed ? <Check className="w-3 h-3" /> : <XIcon className="w-3 h-3" />}
+                          {rule.label}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">Confirm New Password</label>
-                  <input
-                    type="password"
-                    value={confirmPassword}
-                    onChange={(e) => setConfirmPassword(e.target.value)}
-                    placeholder="Re-enter new password"
-                    className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  />
+                  <div className="relative">
+                    <input
+                      type={showConfirmPassword ? "text" : "password"}
+                      value={confirmPassword}
+                      onChange={(e) => setConfirmPassword(e.target.value)}
+                      placeholder="Re-enter new password"
+                      className={`w-full border rounded-lg px-3 py-2 pr-10 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 ${
+                        pwValidation.mismatch ? "border-red-300" : "border-gray-300"
+                      }`}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowConfirmPassword(!showConfirmPassword)}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                      tabIndex={-1}
+                    >
+                      {showConfirmPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                  </div>
+                  {pwValidation.mismatch && (
+                    <p className="mt-1.5 flex items-center gap-1.5 text-xs text-red-500">
+                      <XIcon className="w-3 h-3" />
+                      Passwords do not match
+                    </p>
+                  )}
                 </div>
               </div>
+              {message && (
+                <div
+                  className={`p-3 rounded-lg text-sm flex items-center gap-2 ${
+                    message.type === "success"
+                      ? "bg-green-50 text-green-800 border border-green-200"
+                      : "bg-red-50 text-red-800 border border-red-200"
+                  }`}
+                >
+                  {message.text}
+                </div>
+              )}
             </div>
           </div>
 
