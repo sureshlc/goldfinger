@@ -1,24 +1,33 @@
 "use client";
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, Eye, EyeOff, Upload, Download, X, Check, X as XIcon } from "lucide-react";
 import { useAuth } from "../contexts/AuthContext";
 import { fetchWithAuth, API_BASE_URL } from "../services/auth";
+
+function usePasswordStrength(password: string) {
+  return useMemo(() => {
+    if (!password) return { rules: [], allPassed: true };
+    const rules = [
+      { label: "At least 8 characters", passed: password.length >= 8 },
+      { label: "One uppercase letter", passed: /[A-Z]/.test(password) },
+      { label: "One digit", passed: /\d/.test(password) },
+      { label: "One special character", passed: /[^A-Za-z0-9]/.test(password) },
+    ];
+    return { rules, allPassed: rules.every((r) => r.passed) };
+  }, [password]);
+}
 
 type Tab = "audit-logs" | "items" | "users";
 
 interface AuditLog {
-  id: number;
   timestamp: string;
   user_id: number;
   username: string | null;
-  item_sku: string;
-  desired_quantity: string;
-  can_produce: string | null;
-  status_code: number;
-  response_time_ms: number;
+  action: string;
+  details: string | null;
 }
 
 interface AdminItem {
@@ -139,6 +148,22 @@ function AuditLogsTab() {
 
   const totalPages = Math.ceil(total / perPage);
 
+  const actionLabels: Record<string, { label: string; color: string }> = {
+    login: { label: "Login", color: "bg-blue-100 text-blue-700" },
+    logout: { label: "Logout", color: "bg-gray-100 text-gray-700" },
+    password_changed: { label: "Password Changed", color: "bg-yellow-100 text-yellow-700" },
+    admin_password_reset: { label: "Password Reset", color: "bg-orange-100 text-orange-700" },
+    profile_updated: { label: "Profile Updated", color: "bg-blue-100 text-blue-700" },
+    user_created: { label: "User Created", color: "bg-green-100 text-green-700" },
+    user_updated: { label: "User Updated", color: "bg-blue-100 text-blue-700" },
+    user_deleted: { label: "User Deleted", color: "bg-red-100 text-red-700" },
+    item_created: { label: "Item Created", color: "bg-green-100 text-green-700" },
+    item_updated: { label: "Item Updated", color: "bg-blue-100 text-blue-700" },
+    item_deleted: { label: "Item Deleted", color: "bg-red-100 text-red-700" },
+    items_imported: { label: "Bulk Import", color: "bg-purple-100 text-purple-700" },
+    production_check: { label: "Production Check", color: "bg-indigo-100 text-indigo-700" },
+  };
+
   return (
     <div className="bg-white rounded-xl shadow border border-gray-200 overflow-hidden">
       {loading ? (
@@ -153,44 +178,27 @@ function AuditLogsTab() {
                 <tr>
                   <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Timestamp</th>
                   <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">User</th>
-                  <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Item SKU</th>
-                  <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Qty</th>
-                  <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Producible</th>
-                  <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Time (ms)</th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Action</th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Details</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-50">
-                {logs.map((log) => {
-                  const isProducible = log.can_produce === "True" || log.can_produce === "true";
-                  const hasProduceData = log.can_produce != null && log.can_produce !== "";
+                {logs.map((log, i) => {
+                  const info = actionLabels[log.action] || { label: log.action, color: "bg-gray-100 text-gray-700" };
                   return (
-                    <tr key={log.id} className="hover:bg-blue-50/50 transition">
-                      <td className="px-4 py-2.5 text-gray-600 text-xs">
+                    <tr key={i} className="hover:bg-blue-50/50 transition">
+                      <td className="px-4 py-2.5 text-gray-600 text-xs whitespace-nowrap">
                         {log.timestamp ? new Date(log.timestamp).toLocaleString() : "-"}
                       </td>
-                      <td className="px-4 py-2.5 text-gray-900 font-medium text-xs">
-                        {log.username || `User #${log.user_id}` || "-"}
+                      <td className="px-4 py-2.5 text-gray-900 font-medium text-xs whitespace-nowrap">
+                        {log.username || (log.user_id ? `User #${log.user_id}` : "-")}
                       </td>
-                      <td className="px-4 py-2.5 text-gray-900 font-semibold">{log.item_sku || "-"}</td>
-                      <td className="px-4 py-2.5 text-gray-700">{log.desired_quantity || "-"}</td>
                       <td className="px-4 py-2.5">
-                        {hasProduceData ? (
-                          <span
-                            className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold ${
-                              isProducible
-                                ? "bg-green-100 text-green-700"
-                                : "bg-red-100 text-red-700"
-                            }`}
-                          >
-                            {isProducible ? "Yes" : "No"}
-                          </span>
-                        ) : (
-                          <span className="text-gray-400 text-xs">-</span>
-                        )}
+                        <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold ${info.color}`}>
+                          {info.label}
+                        </span>
                       </td>
-                      <td className="px-4 py-2.5 text-gray-600">
-                        {log.response_time_ms != null ? log.response_time_ms.toFixed(0) : "-"}
-                      </td>
+                      <td className="px-4 py-2.5 text-gray-700 text-xs">{log.details || "-"}</td>
                     </tr>
                   );
                 })}
@@ -229,6 +237,18 @@ function AuditLogsTab() {
 // ============================================================================
 // ITEMS TAB
 // ============================================================================
+interface ImportError {
+  row: number;
+  data: { id?: string; sku?: string; name?: string };
+  error: string;
+}
+
+interface ImportResult {
+  success_count: number;
+  total: number;
+  errors: ImportError[];
+}
+
 function ItemsTab() {
   const [items, setItems] = useState<AdminItem[]>([]);
   const [page, setPage] = useState(1);
@@ -240,6 +260,10 @@ function ItemsTab() {
   const [formId, setFormId] = useState("");
   const [formSku, setFormSku] = useState("");
   const [formName, setFormName] = useState("");
+  const [showImport, setShowImport] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [importResult, setImportResult] = useState<ImportResult | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const perPage = 20;
 
   const fetchItems = useCallback(async () => {
@@ -305,6 +329,105 @@ function ItemsTab() {
     }
   };
 
+  const downloadTemplate = () => {
+    const csv = "id,sku,name\n1001,ITEM-001,Example Item Name\n";
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "items_import_template.csv";
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleFileImport = async (file: File) => {
+    setImporting(true);
+    setImportResult(null);
+
+    try {
+      const text = await file.text();
+      const lines = text.split(/\r?\n/).filter((l) => l.trim());
+      if (lines.length < 2) {
+        setImportResult({ success_count: 0, total: 0, errors: [{ row: 0, data: {}, error: "File is empty or has no data rows" }] });
+        setImporting(false);
+        return;
+      }
+
+      // Parse header to find column indices
+      const header = lines[0].split(",").map((h) => h.trim().toLowerCase());
+      const idIdx = header.indexOf("id");
+      const skuIdx = header.indexOf("sku");
+      const nameIdx = header.indexOf("name");
+
+      if (idIdx === -1 || skuIdx === -1) {
+        setImportResult({ success_count: 0, total: 0, errors: [{ row: 0, data: {}, error: "CSV must have 'id' and 'sku' columns in the header" }] });
+        setImporting(false);
+        return;
+      }
+
+      const dataRows = lines.slice(1);
+      const validItems: { id: number; sku: string; name: string | null }[] = [];
+      const errors: ImportError[] = [];
+
+      dataRows.forEach((line, idx) => {
+        const cols = line.split(",").map((c) => c.trim());
+        const rowNum = idx + 2; // 1-indexed + header
+        const rawId = cols[idIdx] || "";
+        const rawSku = cols[skuIdx] || "";
+        const rawName = nameIdx !== -1 ? cols[nameIdx] || "" : "";
+
+        const parsedId = parseInt(rawId);
+        if (!rawId || isNaN(parsedId)) {
+          errors.push({ row: rowNum, data: { id: rawId, sku: rawSku, name: rawName }, error: "Invalid or missing ID (must be a number)" });
+          return;
+        }
+        if (!rawSku) {
+          errors.push({ row: rowNum, data: { id: rawId, sku: rawSku, name: rawName }, error: "SKU is required" });
+          return;
+        }
+        validItems.push({ id: parsedId, sku: rawSku, name: rawName || null });
+      });
+
+      // Send valid items to backend
+      let successCount = 0;
+      if (validItems.length > 0) {
+        try {
+          const res = await fetchWithAuth(`${API_BASE_URL}/admin/items/bulk-import`, {
+            method: "POST",
+            body: JSON.stringify({ items: validItems }),
+          });
+          if (res.ok) {
+            const data = await res.json();
+            successCount = data.success_count || validItems.length;
+            if (data.errors) {
+              for (const err of data.errors) {
+                errors.push(err);
+              }
+            }
+          } else {
+            const errData = await res.json().catch(() => ({ detail: "Import failed" }));
+            // All valid items failed on server side
+            for (const item of validItems) {
+              errors.push({ row: 0, data: { id: String(item.id), sku: item.sku, name: item.name || "" }, error: errData.detail || "Server error" });
+            }
+          }
+        } catch {
+          for (const item of validItems) {
+            errors.push({ row: 0, data: { id: String(item.id), sku: item.sku, name: item.name || "" }, error: "Network error" });
+          }
+        }
+      }
+
+      setImportResult({ success_count: successCount, total: dataRows.length, errors });
+      if (successCount > 0) fetchItems();
+    } catch {
+      setImportResult({ success_count: 0, total: 0, errors: [{ row: 0, data: {}, error: "Failed to read file" }] });
+    } finally {
+      setImporting(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  };
+
   const totalPages = Math.ceil(total / perPage);
 
   return (
@@ -320,20 +443,111 @@ function ItemsTab() {
           }}
           className="border border-gray-300 rounded-lg px-3 py-2 text-sm w-64 focus:outline-none focus:ring-2 focus:ring-blue-500"
         />
-        <button
-          onClick={() => {
-            setShowForm(true);
-            setEditItem(null);
-            setFormId("");
-            setFormSku("");
-            setFormName("");
-          }}
-          className="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-blue-700"
-          type="button"
-        >
-          Add Item
-        </button>
+        <div className="flex gap-2">
+          <button
+            onClick={() => { setShowImport(true); setImportResult(null); }}
+            className="inline-flex items-center gap-1.5 bg-gray-100 text-gray-700 px-4 py-2 rounded-lg text-sm font-medium hover:bg-gray-200 border border-gray-300"
+            type="button"
+          >
+            <Upload className="w-4 h-4" />
+            Bulk Import
+          </button>
+          <button
+            onClick={() => {
+              setShowForm(true);
+              setEditItem(null);
+              setFormId("");
+              setFormSku("");
+              setFormName("");
+            }}
+            className="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-blue-700"
+            type="button"
+          >
+            Add Item
+          </button>
+        </div>
       </div>
+
+      {/* Bulk Import Panel */}
+      {showImport && (
+        <div className="bg-white p-5 rounded-lg shadow border mb-4">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-sm font-semibold text-gray-800">Bulk Import Items</h3>
+            <button type="button" onClick={() => { setShowImport(false); setImportResult(null); }} className="text-gray-400 hover:text-gray-600">
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+          <p className="text-xs text-gray-500 mb-3">
+            Upload a CSV file with <strong>id</strong>, <strong>sku</strong>, and <strong>name</strong> columns. Download the template below to get started.
+          </p>
+          <div className="flex items-center gap-3 mb-4">
+            <button
+              type="button"
+              onClick={downloadTemplate}
+              className="inline-flex items-center gap-1.5 text-sm text-blue-600 hover:text-blue-700 font-medium"
+            >
+              <Download className="w-4 h-4" />
+              Download Template
+            </button>
+          </div>
+          <div className="flex items-center gap-3">
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".csv"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) handleFileImport(file);
+              }}
+              className="text-sm text-gray-600 file:mr-3 file:py-1.5 file:px-4 file:rounded-lg file:border file:border-gray-300 file:text-sm file:font-medium file:bg-gray-50 file:text-gray-700 hover:file:bg-gray-100"
+            />
+            {importing && <span className="text-sm text-gray-500">Importing...</span>}
+          </div>
+
+          {/* Import Results */}
+          {importResult && (
+            <div className="mt-4">
+              <div className={`p-3 rounded-lg text-sm font-medium ${
+                importResult.errors.length === 0
+                  ? "bg-green-50 text-green-800 border border-green-200"
+                  : importResult.success_count > 0
+                  ? "bg-yellow-50 text-yellow-800 border border-yellow-200"
+                  : "bg-red-50 text-red-800 border border-red-200"
+              }`}>
+                {importResult.success_count} of {importResult.total} rows imported successfully.
+                {importResult.errors.length > 0 && ` ${importResult.errors.length} row(s) had errors.`}
+              </div>
+
+              {importResult.errors.length > 0 && (
+                <div className="mt-3 max-h-60 overflow-y-auto">
+                  <table className="w-full text-xs">
+                    <thead className="bg-red-50 border-b border-red-100 sticky top-0">
+                      <tr>
+                        <th className="px-3 py-2 text-left font-semibold text-red-700">Row</th>
+                        <th className="px-3 py-2 text-left font-semibold text-red-700">ID</th>
+                        <th className="px-3 py-2 text-left font-semibold text-red-700">SKU</th>
+                        <th className="px-3 py-2 text-left font-semibold text-red-700">Name</th>
+                        <th className="px-3 py-2 text-left font-semibold text-red-700">Error</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-red-50">
+                      {importResult.errors.map((err, i) => (
+                        <tr key={i} className="bg-white">
+                          <td className="px-3 py-1.5 text-gray-600">{err.row || "-"}</td>
+                          <td className="px-3 py-1.5 text-gray-700">{err.data?.id || "-"}</td>
+                          <td className="px-3 py-1.5 text-gray-700">{err.data?.sku || "-"}</td>
+                          <td className="px-3 py-1.5 text-gray-700">{err.data?.name || "-"}</td>
+                          <td className="px-3 py-1.5 text-red-700 font-medium">{err.error}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       {showForm && (
         <form onSubmit={handleSubmit} className="bg-white p-4 rounded-lg shadow border mb-4 flex gap-3 items-end">
@@ -460,6 +674,9 @@ function UsersTab() {
   const [formUsername, setFormUsername] = useState("");
   const [formPassword, setFormPassword] = useState("");
   const [formRole, setFormRole] = useState("user");
+  const [formError, setFormError] = useState<string | null>(null);
+  const [showPassword, setShowPassword] = useState(false);
+  const pwStrength = usePasswordStrength(formPassword);
 
   const fetchUsers = useCallback(async () => {
     setLoading(true);
@@ -480,16 +697,18 @@ function UsersTab() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setFormError(null);
     try {
+      let res;
       if (editUser) {
         const body: Record<string, unknown> = { username: formUsername, role: formRole };
         if (formPassword) body.password = formPassword;
-        await fetchWithAuth(`${API_BASE_URL}/admin/users/${editUser.id}`, {
+        res = await fetchWithAuth(`${API_BASE_URL}/admin/users/${editUser.id}`, {
           method: "PUT",
           body: JSON.stringify(body),
         });
       } else {
-        await fetchWithAuth(`${API_BASE_URL}/admin/users`, {
+        res = await fetchWithAuth(`${API_BASE_URL}/admin/users`, {
           method: "POST",
           body: JSON.stringify({
             email: formEmail,
@@ -499,12 +718,17 @@ function UsersTab() {
           }),
         });
       }
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: "Operation failed" }));
+        setFormError(err.detail || "Operation failed");
+        return;
+      }
       setShowForm(false);
       setEditUser(null);
       resetForm();
       fetchUsers();
     } catch {
-      /* ignore */
+      setFormError("Network error. Please try again.");
     }
   };
 
@@ -513,6 +737,8 @@ function UsersTab() {
     setFormUsername("");
     setFormPassword("");
     setFormRole("user");
+    setFormError(null);
+    setShowPassword(false);
   };
 
   const handleEdit = (u: AdminUser) => {
@@ -521,13 +747,20 @@ function UsersTab() {
     setFormUsername(u.username);
     setFormPassword("");
     setFormRole(u.role);
+    setFormError(null);
+    setShowPassword(false);
     setShowForm(true);
   };
 
   const handleDelete = async (id: number) => {
     if (!confirm("Delete this user?")) return;
     try {
-      await fetchWithAuth(`${API_BASE_URL}/admin/users/${id}`, { method: "DELETE" });
+      const res = await fetchWithAuth(`${API_BASE_URL}/admin/users/${id}`, { method: "DELETE" });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: "Delete failed" }));
+        alert(err.detail || "Delete failed");
+        return;
+      }
       fetchUsers();
     } catch {
       /* ignore */
@@ -589,13 +822,35 @@ function UsersTab() {
             <label className="block text-xs font-medium text-gray-600 mb-1">
               Password {editUser && "(leave blank to keep)"}
             </label>
-            <input
-              type="password"
-              value={formPassword}
-              onChange={(e) => setFormPassword(e.target.value)}
-              required={!editUser}
-              className="border rounded px-2 py-1.5 text-sm w-full"
-            />
+            <div className="relative">
+              <input
+                type={showPassword ? "text" : "password"}
+                value={formPassword}
+                onChange={(e) => setFormPassword(e.target.value)}
+                required={!editUser}
+                className={`border rounded px-2 py-1.5 pr-8 text-sm w-full ${
+                  formPassword && !pwStrength.allPassed ? "border-red-300" : ""
+                }`}
+              />
+              <button
+                type="button"
+                onClick={() => setShowPassword(!showPassword)}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                tabIndex={-1}
+              >
+                {showPassword ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+              </button>
+            </div>
+            {formPassword && (
+              <ul className="mt-1 space-y-0.5">
+                {pwStrength.rules.map((rule) => (
+                  <li key={rule.label} className={`flex items-center gap-1 text-xs ${rule.passed ? "text-green-600" : "text-red-500"}`}>
+                    {rule.passed ? <Check className="w-3 h-3" /> : <XIcon className="w-3 h-3" />}
+                    {rule.label}
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
           <div>
             <label className="block text-xs font-medium text-gray-600 mb-1">Role</label>
@@ -608,6 +863,11 @@ function UsersTab() {
               <option value="admin">Admin</option>
             </select>
           </div>
+          {formError && (
+            <div className="col-span-2 p-2.5 rounded-lg text-sm bg-red-50 text-red-800 border border-red-200">
+              {formError}
+            </div>
+          )}
           <div className="col-span-2 flex gap-2">
             <button type="submit" className="bg-blue-600 text-white px-4 py-1.5 rounded text-sm font-medium hover:bg-blue-700">
               {editUser ? "Update" : "Create"}

@@ -20,6 +20,7 @@ interface ItemData {
   sku: string;
   name: string;
   id?: string;
+  description?: string;
 }
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL;
@@ -111,7 +112,7 @@ export default function ItemDetailPage({ params, searchParams }: Props) {
         </Link>
         <ItemDetails
           sku={item.sku || sku}
-          name={item.name}
+          name={item.description || item.name}
           inventoryData={inventory}
           productionData={production}
           desiredQuantity={desiredQuantity}

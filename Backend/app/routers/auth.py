@@ -49,7 +49,7 @@ async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends
         logger.warning(f"Rate limit exceeded for IP: {client_ip}")
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Too many login attempts. Please try again later.",
+            detail="Too many login attempts. Please try again in 5 minutes.",
         )
 
     _record_login_attempt(client_ip)
@@ -98,6 +98,9 @@ async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends
 
     logger.info(f"User {user.email} logged in successfully")
 
+    from app.utils.audit import log_audit_event
+    await log_audit_event(user.id, "login", f"User logged in")
+
     return {"access_token": access_token, "token_type": "bearer"}
 
 
@@ -128,6 +131,9 @@ async def logout(
 
     success = session_service.end_user_session(user_id_str)
 
+    from app.utils.audit import log_audit_event
+    await log_audit_event(current_user.id, "logout", "User logged out")
+
     if success:
         logger.info(f"User {current_user.email} (ID: {user_id_str}) logged out successfully")
         return {"message": "Successfully logged out", "status": "success"}
@@ -157,6 +163,8 @@ def _validate_password_strength(password: str) -> None:
         raise HTTPException(status_code=400, detail="Password must contain at least one uppercase letter")
     if not any(c.isdigit() for c in password):
         raise HTTPException(status_code=400, detail="Password must contain at least one digit")
+    if all(c.isalnum() for c in password):
+        raise HTTPException(status_code=400, detail="Password must contain at least one special character")
 
 
 class ProfileUpdate(BaseModel):
@@ -203,8 +211,15 @@ async def update_profile(
         if not updates:
             raise HTTPException(status_code=400, detail="No fields to update")
 
+        changed_fields = list(updates.keys())
         updated = await update_user(session, current_user.id, **updates)
         await session.commit()
+
+        from app.utils.audit import log_audit_event
+        if "password" in changed_fields:
+            await log_audit_event(current_user.id, "password_changed", "User changed their own password")
+        if "username" in changed_fields:
+            await log_audit_event(current_user.id, "profile_updated", f"Display name changed to '{updated.username}'")
 
         return {
             "message": "Profile updated successfully",

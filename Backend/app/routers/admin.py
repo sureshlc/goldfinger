@@ -4,7 +4,7 @@ All endpoints require admin role.
 """
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, EmailStr
-from typing import Optional
+from typing import Optional, List
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.dependencies.auth import get_admin_user
 from app.database.connection import get_db
@@ -13,6 +13,17 @@ import logging
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+def _validate_admin_password(password: str) -> None:
+    if len(password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+    if not any(c.isupper() for c in password):
+        raise HTTPException(status_code=400, detail="Password must contain at least one uppercase letter")
+    if not any(c.isdigit() for c in password):
+        raise HTTPException(status_code=400, detail="Password must contain at least one digit")
+    if all(c.isalnum() for c in password):
+        raise HTTPException(status_code=400, detail="Password must contain at least one special character")
 
 
 # ============================================================================
@@ -68,10 +79,13 @@ async def create_user(
         raise HTTPException(status_code=400, detail="Email already registered")
 
     # Validate password strength
-    if len(body.password) < 8:
-        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+    _validate_admin_password(body.password)
 
     user = await repo_create(db, body.email, body.username, body.password, body.role)
+
+    from app.utils.audit import log_audit_event
+    await log_audit_event(admin.id, "user_created", f"Created user '{body.username}' ({body.email}) with role '{body.role}'")
+
     return {
         "id": user.id,
         "email": user.email,
@@ -93,9 +107,20 @@ async def update_user(
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")
 
+    # Validate password strength if being updated
+    if "password" in updates:
+        _validate_admin_password(updates["password"])
+
     user = await repo_update(db, user_id, **updates)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+
+    from app.utils.audit import log_audit_event
+    changed = ", ".join(updates.keys())
+    if "password" in updates:
+        await log_audit_event(admin.id, "admin_password_reset", f"Reset password for user '{user.email}'")
+    else:
+        await log_audit_event(admin.id, "user_updated", f"Updated user '{user.email}' ({changed})")
 
     return {
         "id": user.id,
@@ -117,9 +142,17 @@ async def delete_user(
     if user_id == admin.id:
         raise HTTPException(status_code=400, detail="Cannot delete yourself")
 
+    # Get user info before deleting for the audit log
+    from app.database.repositories.user_repo import get_user_by_id
+    target_user = await get_user_by_id(db, user_id)
+
     success = await repo_delete(db, user_id)
     if not success:
         raise HTTPException(status_code=404, detail="User not found")
+
+    from app.utils.audit import log_audit_event
+    target_email = target_user.email if target_user else f"ID {user_id}"
+    await log_audit_event(admin.id, "user_deleted", f"Deleted user '{target_email}'")
 
     return {"message": "User deleted"}
 
@@ -176,6 +209,10 @@ async def create_item(
     from app.database.repositories.item_repo import upsert_item
 
     item = await upsert_item(db, body.id, body.sku, body.name)
+
+    from app.utils.audit import log_audit_event
+    await log_audit_event(admin.id, "item_created", f"Created item '{body.sku}' (ID: {body.id})")
+
     return {"id": item.id, "sku": item.sku, "name": item.name}
 
 
@@ -198,6 +235,9 @@ async def update_item(
         item.name = body.name
     await db.flush()
 
+    from app.utils.audit import log_audit_event
+    await log_audit_event(admin.id, "item_updated", f"Updated item '{item.sku}' (ID: {item_id})")
+
     return {"id": item.id, "sku": item.sku, "name": item.name}
 
 
@@ -209,11 +249,63 @@ async def delete_item(
 ):
     from app.database.repositories.item_repo import delete_item as repo_delete
 
+    # Get item info before deleting for audit
+    from app.database.repositories.item_repo import get_item_by_id as get_item
+    target_item = await get_item(db, item_id)
+
     success = await repo_delete(db, item_id)
     if not success:
         raise HTTPException(status_code=404, detail="Item not found")
 
+    from app.utils.audit import log_audit_event
+    item_sku = target_item.sku if target_item else f"ID {item_id}"
+    await log_audit_event(admin.id, "item_deleted", f"Deleted item '{item_sku}' (ID: {item_id})")
+
     return {"message": "Item deleted"}
+
+
+class BulkImportItem(BaseModel):
+    id: int
+    sku: str
+    name: Optional[str] = None
+
+
+class BulkImportRequest(BaseModel):
+    items: List[BulkImportItem]
+
+
+@router.post("/items/bulk-import")
+async def bulk_import_items(
+    body: BulkImportRequest,
+    admin: User = Depends(get_admin_user),
+    db: AsyncSession = Depends(get_db),
+):
+    from app.database.repositories.item_repo import upsert_item
+
+    success_count = 0
+    errors = []
+
+    for idx, item in enumerate(body.items):
+        try:
+            await upsert_item(db, item.id, item.sku, item.name)
+            success_count += 1
+        except Exception as e:
+            errors.append({
+                "row": idx + 2,  # +2 for 1-indexed + header row
+                "data": {"id": str(item.id), "sku": item.sku, "name": item.name or ""},
+                "error": str(e),
+            })
+
+    from app.utils.audit import log_audit_event
+    total = len(body.items)
+    fail_count = len(errors)
+    await log_audit_event(admin.id, "items_imported", f"Bulk CSV import: {success_count}/{total} succeeded, {fail_count} failed")
+
+    return {
+        "success_count": success_count,
+        "total": total,
+        "errors": errors,
+    }
 
 
 # ============================================================================
@@ -227,33 +319,65 @@ async def get_audit_logs(
     admin: User = Depends(get_admin_user),
     db: AsyncSession = Depends(get_db),
 ):
-    from app.database.repositories.log_repo import get_audit_logs as repo_audit
+    from sqlalchemy import select, func, desc, union_all, literal, cast, String
+    from app.database.models import AuditEventDB, RequestLogDB, UserDB
 
-    result = await repo_audit(db, page, per_page)
+    # Build unified query: audit events + production checks
+    audit_q = (
+        select(
+            AuditEventDB.timestamp.label("timestamp"),
+            AuditEventDB.user_id.label("user_id"),
+            UserDB.username.label("username"),
+            AuditEventDB.action.label("action"),
+            AuditEventDB.details.label("details"),
+        )
+        .outerjoin(UserDB, AuditEventDB.user_id == UserDB.id)
+    )
+
+    production_q = (
+        select(
+            RequestLogDB.timestamp.label("timestamp"),
+            RequestLogDB.user_id.label("user_id"),
+            UserDB.username.label("username"),
+            literal("production_check").label("action"),
+            func.concat(
+                'SKU: ', func.coalesce(RequestLogDB.item_sku, '?'),
+                ', Qty: ', func.coalesce(RequestLogDB.desired_quantity, '?'),
+                ', Producible: ', func.coalesce(RequestLogDB.can_produce, '?'),
+                ', Max: ', func.coalesce(RequestLogDB.max_producible, '?'),
+            ).label("details"),
+        )
+        .outerjoin(UserDB, RequestLogDB.user_id == UserDB.id)
+        .where(RequestLogDB.item_sku.isnot(None))
+    )
+
+    combined = union_all(audit_q, production_q).subquery()
+
+    # Total count
+    total_result = await db.execute(select(func.count()).select_from(combined))
+    total = total_result.scalar() or 0
+
+    # Paginated results
+    result = await db.execute(
+        select(combined)
+        .order_by(desc(combined.c.timestamp))
+        .offset((page - 1) * per_page)
+        .limit(per_page)
+    )
+    rows = result.all()
+
     return {
         "logs": [
             {
-                "id": entry["log"].id,
-                "timestamp": entry["log"].timestamp.isoformat() if entry["log"].timestamp else None,
-                "request_id": entry["log"].request_id,
-                "session_id": entry["log"].session_id,
-                "user_id": entry["log"].user_id,
-                "username": entry["username"],
-                "item_sku": entry["log"].item_sku,
-                "desired_quantity": entry["log"].desired_quantity,
-                "max_producible": entry["log"].max_producible,
-                "can_produce": entry["log"].can_produce,
-                "limiting_component": entry["log"].limiting_component,
-                "shortages_count": entry["log"].shortages_count,
-                "response_time_ms": entry["log"].response_time_ms,
-                "status_code": entry["log"].status_code,
-                "error_type": entry["log"].error_type,
-                "error_message": entry["log"].error_message,
-                "cache_hit": entry["log"].cache_hit,
+                "timestamp": row.timestamp.isoformat() if row.timestamp else None,
+                "user_id": row.user_id,
+                "username": row.username,
+                "action": row.action,
+                "details": row.details,
             }
-            for entry in result["logs"]
+            for row in rows
         ],
-        "total": result["total"],
-        "page": result["page"],
-        "per_page": result["per_page"],
+        "total": total,
+        "page": page,
+        "per_page": per_page,
     }
