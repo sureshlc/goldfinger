@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { use, useEffect, useState } from "react";
 import Link from "next/link";
 import { ArrowLeft, AlertTriangle } from "lucide-react";
 import ItemDetails from "@/app/components/ItemDetails/ItemDetails";
@@ -8,12 +8,12 @@ import { fetchWithAuth } from "@/app/services/auth";
 import Loading from "@/app/item/[sku]/loading";
 
 type Props = {
-  params: {
+  params: Promise<{
     sku: string;
-  };
-  searchParams: {
+  }>;
+  searchParams: Promise<{
     quantity?: string;
-  };
+  }>;
 };
 
 interface ItemData {
@@ -29,8 +29,9 @@ const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL;
  * Client component - fetches item, inventory, and production data with auth
  */
 export default function ItemDetailPage({ params, searchParams }: Props) {
-  const { sku } = params;
-  const desiredQuantity = parseInt(searchParams.quantity || "1");
+  const { sku } = use(params);
+  const { quantity } = use(searchParams);
+  const desiredQuantity = parseInt(quantity || "1");
 
   const [item, setItem] = useState<ItemData | null>(null);
   const [inventory, setInventory] = useState(null);
