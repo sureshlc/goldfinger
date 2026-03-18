@@ -19,6 +19,13 @@ async def get_item_by_id(db: AsyncSession, item_id: int) -> Optional[ItemDB]:
 
 
 async def upsert_item(db: AsyncSession, item_id: int, sku: str, name: str = None) -> ItemDB:
+    # Check if SKU already exists with a different ID
+    existing = await get_item_by_sku(db, sku)
+    if existing and existing.id != item_id:
+        raise ValueError(
+            f"SKU '{sku}' already exists with a different ID (existing ID: {existing.id}, given ID: {item_id})"
+        )
+
     stmt = insert(ItemDB).values(id=item_id, sku=sku, name=name)
     stmt = stmt.on_conflict_do_update(
         index_elements=["id"],

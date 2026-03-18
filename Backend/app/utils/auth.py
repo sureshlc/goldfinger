@@ -6,13 +6,15 @@ import hashlib
 from datetime import datetime, timedelta
 from typing import Optional, Dict
 from threading import Lock
-from jose import JWTError, jwt
-from passlib.context import CryptContext
+import jwt
+from jwt.exceptions import PyJWTError
+import argon2
+import argon2.exceptions
 from app.config import settings
 from app.models.user import TokenData
 
-# Password hashing context - using argon2 instead of bcrypt
-pwd_context = CryptContext(schemes=["argon2"], deprecated="auto")
+# Password hashing - using argon2-cffi directly (passlib is abandoned)
+_password_hasher = argon2.PasswordHasher()
 
 # Token blacklist: hash -> expires_at
 _token_blacklist: Dict[str, datetime] = {}
@@ -51,7 +53,10 @@ def is_token_blacklisted(token: str) -> bool:
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Verify a password against a hash"""
-    return pwd_context.verify(plain_password, hashed_password)
+    try:
+        return _password_hasher.verify(hashed_password, plain_password)
+    except argon2.exceptions.VerifyMismatchError:
+        return False
 
 
 _password_executor = __import__('concurrent.futures', fromlist=['ThreadPoolExecutor']).ThreadPoolExecutor(max_workers=4)
@@ -62,12 +67,12 @@ async def verify_password_async(plain_password: str, hashed_password: str) -> bo
     import asyncio
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(
-        _password_executor, pwd_context.verify, plain_password, hashed_password
+        _password_executor, verify_password, plain_password, hashed_password
     )
 
 def get_password_hash(password: str) -> str:
     """Hash a password"""
-    return pwd_context.hash(password)
+    return _password_hasher.hash(password)
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
     """Create a JWT access token"""
@@ -94,7 +99,7 @@ def verify_token(token: str) -> Optional[str]:
         if username is None:
             return None
         return username
-    except JWTError:
+    except PyJWTError:
         return None
 
 def decode_token(token: str) -> Optional[TokenData]:
@@ -115,7 +120,7 @@ def decode_token(token: str) -> Optional[TokenData]:
             user_id=int(user_id) if user_id else None,
             session_id=session_id
         )
-    except JWTError:
+    except PyJWTError:
         return None
     except (ValueError, TypeError):
         return None

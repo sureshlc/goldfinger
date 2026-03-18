@@ -116,10 +116,10 @@ async def logout(
     logger.info(f"Logout request for user {current_user.email} (ID: {user_id_str})")
 
     raw_token = credentials.credentials
-    from jose import jwt as jose_jwt
+    import jwt
 
     try:
-        payload = jose_jwt.decode(
+        payload = jwt.decode(
             raw_token, settings.secret_key, algorithms=[settings.algorithm]
         )
         exp = payload.get("exp")
