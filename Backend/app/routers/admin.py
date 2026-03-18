@@ -281,19 +281,43 @@ async def bulk_import_items(
     db: AsyncSession = Depends(get_db),
 ):
     from app.database.repositories.item_repo import upsert_item
+    from sqlalchemy.exc import IntegrityError
 
     success_count = 0
     errors = []
 
     for idx, item in enumerate(body.items):
         try:
+            savepoint = await db.begin_nested()
             await upsert_item(db, item.id, item.sku, item.name)
+            await savepoint.commit()
             success_count += 1
-        except Exception as e:
+        except ValueError as e:
+            await savepoint.rollback()
             errors.append({
-                "row": idx + 2,  # +2 for 1-indexed + header row
+                "row": idx + 2,
                 "data": {"id": str(item.id), "sku": item.sku, "name": item.name or ""},
                 "error": str(e),
+            })
+        except IntegrityError as e:
+            await savepoint.rollback()
+            detail = str(e.orig) if e.orig else str(e)
+            if "unique" in detail.lower() or "duplicate" in detail.lower():
+                msg = f"Duplicate entry: ID {item.id} or SKU '{item.sku}' already exists"
+            else:
+                msg = f"Database constraint violation for SKU '{item.sku}'"
+            errors.append({
+                "row": idx + 2,
+                "data": {"id": str(item.id), "sku": item.sku, "name": item.name or ""},
+                "error": msg,
+            })
+        except Exception as e:
+            await savepoint.rollback()
+            logger.error(f"Bulk import error row {idx+2}: {e}")
+            errors.append({
+                "row": idx + 2,
+                "data": {"id": str(item.id), "sku": item.sku, "name": item.name or ""},
+                "error": f"Import failed for SKU '{item.sku}'",
             })
 
     from app.utils.audit import log_audit_event

@@ -344,9 +344,79 @@ function ItemsTab() {
     setImporting(true);
     setImportResult(null);
 
+    // File size limit: 5MB
+    const MAX_FILE_SIZE = 5 * 1024 * 1024;
+    if (file.size > MAX_FILE_SIZE) {
+      setImportResult({ success_count: 0, total: 0, errors: [{ row: 0, data: {}, error: "File too large (max 5MB)" }] });
+      setImporting(false);
+      return;
+    }
+
     try {
       const text = await file.text();
-      const lines = text.split(/\r?\n/).filter((l) => l.trim());
+
+      // Proper CSV parser that handles quoted fields
+      const parseCSVRow = (row: string): string[] => {
+        const fields: string[] = [];
+        let i = 0;
+        while (i <= row.length) {
+          if (i === row.length) { fields.push(""); break; }
+          if (row[i] === '"') {
+            let value = "";
+            i++; // skip opening quote
+            while (i < row.length) {
+              if (row[i] === '"') {
+                if (i + 1 < row.length && row[i + 1] === '"') {
+                  value += '"';
+                  i += 2;
+                } else {
+                  i++; // skip closing quote
+                  break;
+                }
+              } else {
+                value += row[i];
+                i++;
+              }
+            }
+            fields.push(value);
+            if (i < row.length && row[i] === ',') i++; // skip comma
+          } else {
+            const next = row.indexOf(',', i);
+            if (next === -1) {
+              fields.push(row.substring(i));
+              break;
+            } else {
+              fields.push(row.substring(i, next));
+              i = next + 1;
+            }
+          }
+        }
+        return fields.map((f) => f.trim());
+      };
+
+      // Split lines respecting quoted fields that may contain newlines
+      const splitCSVLines = (csv: string): string[] => {
+        const lines: string[] = [];
+        let current = "";
+        let inQuotes = false;
+        for (let i = 0; i < csv.length; i++) {
+          const ch = csv[i];
+          if (ch === '"') {
+            inQuotes = !inQuotes;
+            current += ch;
+          } else if (!inQuotes && (ch === '\n' || (ch === '\r' && csv[i + 1] === '\n'))) {
+            if (current.trim()) lines.push(current);
+            current = "";
+            if (ch === '\r') i++; // skip \n in \r\n
+          } else {
+            current += ch;
+          }
+        }
+        if (current.trim()) lines.push(current);
+        return lines;
+      };
+
+      const lines = splitCSVLines(text);
       if (lines.length < 2) {
         setImportResult({ success_count: 0, total: 0, errors: [{ row: 0, data: {}, error: "File is empty or has no data rows" }] });
         setImporting(false);
@@ -354,7 +424,7 @@ function ItemsTab() {
       }
 
       // Parse header to find column indices
-      const header = lines[0].split(",").map((h) => h.trim().toLowerCase());
+      const header = parseCSVRow(lines[0]).map((h) => h.toLowerCase());
       const idIdx = header.indexOf("id");
       const skuIdx = header.indexOf("sku");
       const nameIdx = header.indexOf("name");
@@ -366,11 +436,21 @@ function ItemsTab() {
       }
 
       const dataRows = lines.slice(1);
+
+      // Row count limit: 10,000
+      const MAX_ROWS = 10000;
+      if (dataRows.length > MAX_ROWS) {
+        setImportResult({ success_count: 0, total: 0, errors: [{ row: 0, data: {}, error: `Too many rows (${dataRows.length}). Maximum is ${MAX_ROWS}.` }] });
+        setImporting(false);
+        return;
+      }
+
       const validItems: { id: number; sku: string; name: string | null }[] = [];
       const errors: ImportError[] = [];
+      const seenSkus = new Map<string, number>(); // sku -> first row number
 
       dataRows.forEach((line, idx) => {
-        const cols = line.split(",").map((c) => c.trim());
+        const cols = parseCSVRow(line);
         const rowNum = idx + 2; // 1-indexed + header
         const rawId = cols[idIdx] || "";
         const rawSku = cols[skuIdx] || "";
@@ -385,6 +465,15 @@ function ItemsTab() {
           errors.push({ row: rowNum, data: { id: rawId, sku: rawSku, name: rawName }, error: "SKU is required" });
           return;
         }
+
+        // Duplicate SKU detection within the batch
+        const prevRow = seenSkus.get(rawSku);
+        if (prevRow !== undefined) {
+          errors.push({ row: rowNum, data: { id: rawId, sku: rawSku, name: rawName }, error: `Duplicate SKU '${rawSku}' (first seen on row ${prevRow})` });
+          return;
+        }
+        seenSkus.set(rawSku, rowNum);
+
         validItems.push({ id: parsedId, sku: rawSku, name: rawName || null });
       });
 
