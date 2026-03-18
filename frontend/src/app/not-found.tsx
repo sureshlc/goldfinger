@@ -1,5 +1,7 @@
 import Link from "next/link";
 
+export const dynamic = "force-dynamic";
+
 export default function NotFound() {
   return (
     <div className="min-h-[calc(100vh-5rem)] bg-gradient-to-b from-blue-50 to-white flex flex-col items-center justify-center px-4">
