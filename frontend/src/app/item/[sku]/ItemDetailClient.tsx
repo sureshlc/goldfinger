@@ -39,10 +39,11 @@ export default function ItemDetailClient({
 
       try {
         // Fetch all data with authentication
+        const encodedSku = encodeURIComponent(sku);
         const [itemRes, inventoryRes, productionRes] = await Promise.all([
-          fetchWithAuth(`${API_BASE_URL}/items/sku/${sku}`),
-          fetchWithAuth(`${API_BASE_URL}/inventory/${sku}`),
-          fetchWithAuth(`${API_BASE_URL}/production/feasibility/${sku}?desired_quantity=${desiredQuantity}`),
+          fetchWithAuth(`${API_BASE_URL}/items/sku/${encodedSku}`),
+          fetchWithAuth(`${API_BASE_URL}/inventory/${encodedSku}`),
+          fetchWithAuth(`${API_BASE_URL}/production/feasibility/${encodedSku}?desired_quantity=${desiredQuantity}`),
         ]);
 
         if (!itemRes.ok) {
