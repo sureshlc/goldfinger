@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException, Query, Depends, Request
 from typing import Optional, List
 import logging
 import time
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from app.services.production_service import ProductionService
 from app.services.service_registry import get_production_service, get_bom_service
 from app.utils.suiteql_sanitizer import validate_suiteql_identifier
@@ -35,6 +35,42 @@ class ProductionAnalysisResponse(BaseModel):
     component_availability: list
     shortages: list
     location_name: Optional[str]
+
+
+# ============================================================================
+# BATCH FEASIBILITY MODELS
+# ============================================================================
+
+class BatchFeasibilityItem(BaseModel):
+    sku: str
+    desired_quantity: int = Field(ge=1)
+
+class BatchFeasibilityRequest(BaseModel):
+    items: List[BatchFeasibilityItem] = Field(min_length=1, max_length=50)
+    location_name: Optional[str] = None
+
+class MaterialContention(BaseModel):
+    component_sku: str
+    component_name: str
+    total_available: float
+    total_demanded: float
+    shortage: float
+    demanded_by: List[dict]  # [{ sku, quantity_needed }]
+
+class BatchItemResult(BaseModel):
+    item_sku: str
+    item_name: str
+    desired_quantity: int
+    can_produce: bool
+    max_quantity_producible: int
+    limiting_component: Optional[str]
+    shortages: list
+    status: str  # "fully_producible" | "partially_producible" | "blocked"
+
+class BatchFeasibilityResponse(BaseModel):
+    results: List[BatchItemResult]
+    material_contentions: List[MaterialContention]
+    summary: dict  # { total_skus, fully_producible, partially_producible, blocked, contention_count }
 
 
 @router.get("/feasibility/{item_identifier}", response_model=ProductionAnalysisResponse)
@@ -211,6 +247,37 @@ async def get_production_shortages(
     except Exception as e:
         logger.error(f"Error getting production shortages: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to get production shortages")
+
+
+# ============================================================================
+# BATCH FEASIBILITY ENDPOINT
+# ============================================================================
+
+@router.post("/batch-feasibility", response_model=BatchFeasibilityResponse)
+async def get_batch_feasibility(
+    request: Request,
+    body: BatchFeasibilityRequest,
+    current_user: User = Depends(get_current_user),
+    production_service: ProductionService = Depends(get_production_service),
+):
+    """Analyze production feasibility for multiple SKUs with shared material detection."""
+    request_start = time.time()
+    try:
+        logger.info(f"[ROUTER] Batch feasibility request for {len(body.items)} SKUs")
+
+        result = await production_service.get_batch_production_analysis(
+            items=[(item.sku, item.desired_quantity) for item in body.items],
+            location_name=body.location_name,
+        )
+
+        elapsed = time.time() - request_start
+        logger.info(f"[ROUTER] Batch feasibility took {elapsed:.3f}s")
+
+        return result
+
+    except Exception as e:
+        logger.error(f"Error in batch feasibility: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to analyze batch feasibility")
 
 
 # ============================================================================

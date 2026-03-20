@@ -92,6 +92,39 @@ class CacheManager:
             }
         logger.debug(f"Cached value for key: {key}")
 
+    async def get_many(self, keys: list) -> Dict[str, Any]:
+        """Get multiple values from cache in one lock acquisition. Returns {key: value} for hits only."""
+        results = {}
+        now = datetime.now()
+        async with self._lock:
+            for key in keys:
+                if key in self._cache:
+                    cache_data = self._cache[key]
+                    ttl = self._get_ttl_for_prefix(key)
+                    age = now - cache_data['timestamp']
+                    category = self._get_stats_category(key)
+                    if age < timedelta(seconds=ttl):
+                        self.stats[category]['hits'] += 1
+                        results[key] = cache_data['value']
+                    else:
+                        self.stats[category]['expirations'] += 1
+                        del self._cache[key]
+                else:
+                    category = self._get_stats_category(key)
+                    self.stats[category]['misses'] += 1
+        return results
+
+    async def set_many(self, entries: Dict[str, Any]) -> None:
+        """Set multiple values in cache in one lock acquisition."""
+        now = datetime.now()
+        async with self._lock:
+            for key, value in entries.items():
+                self._cache[key] = {
+                    'value': value,
+                    'timestamp': now,
+                }
+        logger.debug(f"Cached {len(entries)} entries in batch")
+
     async def invalidate(self, key: str) -> None:
         """Remove specific key from cache (thread-safe)."""
         async with self._lock:
@@ -155,3 +188,8 @@ def make_inventory_cache_key(item_ids: list, location_name: str = None) -> str:
     sorted_ids = ",".join(sorted(str(i) for i in item_ids))
     loc = f"|loc:{location_name}" if location_name else ""
     return f"inventory:{sorted_ids}{loc}"
+
+
+def make_single_inventory_cache_key(item_id: str, location_name: str = None) -> str:
+    loc = f"|loc:{location_name}" if location_name else ""
+    return f"inventory:{item_id}{loc}"

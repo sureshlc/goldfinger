@@ -156,7 +156,7 @@ app.add_middleware(
     allow_origins=settings.cors_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE"],
-    allow_headers=["Authorization", "Content-Type", "Accept"],
+    allow_headers=["Authorization", "Content-Type", "Accept", "X-API-Key"],
 )
 
 # Add Security Headers middleware
@@ -197,6 +197,15 @@ async def root():
 async def health_check():
     return {
         "status": "healthy",
+        "version": settings.api_version,
+        "environment": settings.environment,
+    }
+
+@app.get("/api/v1/ping", tags=["Integration"])
+async def ping(current_user=Depends(get_current_user)):
+    """Authenticated ping for external integrations (e.g. MES) to verify connectivity and API key validity."""
+    return {
+        "status": "ok",
         "version": settings.api_version,
         "environment": settings.environment,
     }

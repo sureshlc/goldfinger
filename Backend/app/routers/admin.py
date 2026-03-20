@@ -333,6 +333,123 @@ async def bulk_import_items(
 
 
 # ============================================================================
+# API KEY MANAGEMENT
+# ============================================================================
+
+class CreateAPIKeyRequest(BaseModel):
+    name: str
+
+
+@router.get("/api-keys")
+async def list_api_keys(
+    page: int = Query(1, ge=1),
+    per_page: int = Query(20, ge=1, le=100),
+    admin: User = Depends(get_admin_user),
+    db: AsyncSession = Depends(get_db),
+):
+    from app.database.repositories.api_key_repo import get_all_api_keys
+
+    result = await get_all_api_keys(db, page, per_page)
+    return {
+        "api_keys": [
+            {
+                "id": k.id,
+                "name": k.name,
+                "key_prefix": k.key_prefix,
+                "is_active": k.is_active,
+                "created_by": k.created_by,
+                "created_at": k.created_at.isoformat() if k.created_at else None,
+                "last_used_at": k.last_used_at.isoformat() if k.last_used_at else None,
+            }
+            for k in result["api_keys"]
+        ],
+        "total": result["total"],
+        "page": result["page"],
+        "per_page": result["per_page"],
+    }
+
+
+@router.post("/api-keys")
+async def create_api_key(
+    body: CreateAPIKeyRequest,
+    admin: User = Depends(get_admin_user),
+    db: AsyncSession = Depends(get_db),
+):
+    from app.database.repositories.api_key_repo import create_api_key as repo_create
+
+    if not body.name or not body.name.strip():
+        raise HTTPException(status_code=400, detail="Key name is required")
+
+    api_key, raw_key = await repo_create(db, body.name.strip(), admin.id)
+
+    from app.utils.audit import log_audit_event
+    await log_audit_event(admin.id, "api_key_created", f"Created API key '{body.name.strip()}' (prefix: {api_key.key_prefix})")
+
+    return {
+        "id": api_key.id,
+        "name": api_key.name,
+        "key": raw_key,
+        "key_prefix": api_key.key_prefix,
+        "created_at": api_key.created_at.isoformat() if api_key.created_at else None,
+        "message": "Save this key now. It cannot be retrieved again.",
+    }
+
+
+@router.put("/api-keys/{key_id}/revoke")
+async def revoke_api_key(
+    key_id: int,
+    admin: User = Depends(get_admin_user),
+    db: AsyncSession = Depends(get_db),
+):
+    from app.database.repositories.api_key_repo import revoke_api_key as repo_revoke
+
+    success = await repo_revoke(db, key_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="API key not found")
+
+    from app.utils.audit import log_audit_event
+    await log_audit_event(admin.id, "api_key_revoked", f"Revoked API key ID {key_id}")
+
+    return {"message": "API key revoked"}
+
+
+@router.put("/api-keys/{key_id}/activate")
+async def activate_api_key(
+    key_id: int,
+    admin: User = Depends(get_admin_user),
+    db: AsyncSession = Depends(get_db),
+):
+    from app.database.repositories.api_key_repo import activate_api_key as repo_activate
+
+    success = await repo_activate(db, key_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="API key not found")
+
+    from app.utils.audit import log_audit_event
+    await log_audit_event(admin.id, "api_key_activated", f"Activated API key ID {key_id}")
+
+    return {"message": "API key activated"}
+
+
+@router.delete("/api-keys/{key_id}")
+async def delete_api_key(
+    key_id: int,
+    admin: User = Depends(get_admin_user),
+    db: AsyncSession = Depends(get_db),
+):
+    from app.database.repositories.api_key_repo import delete_api_key as repo_delete
+
+    success = await repo_delete(db, key_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="API key not found")
+
+    from app.utils.audit import log_audit_event
+    await log_audit_event(admin.id, "api_key_deleted", f"Deleted API key ID {key_id}")
+
+    return {"message": "API key deleted"}
+
+
+# ============================================================================
 # AUDIT LOGS
 # ============================================================================
 

@@ -8,6 +8,9 @@ from app.utils.suiteql_sanitizer import validate_suiteql_identifier
 import logging
 from app.dependencies.auth import get_current_user
 from app.models.user import User
+from app.database.connection import get_db
+from app.database.repositories.item_repo import get_item_by_sku, get_item_by_id
+from sqlalchemy.ext.asyncio import AsyncSession
 
 
 router = APIRouter()
@@ -42,7 +45,8 @@ class BOMResponse(BaseModel):
 async def get_item_details_by_sku(
     item_sku: str,
     current_user: User = Depends(get_current_user),
-    bom_service: BOMService = Depends(get_bom_service)
+    bom_service: BOMService = Depends(get_bom_service),
+    db: AsyncSession = Depends(get_db)
 ):
     try:
         validate_suiteql_identifier(item_sku, "item_sku")
@@ -60,7 +64,21 @@ async def get_item_details_by_sku(
     logger.debug(f"NetSuite returned item details: {item}")
 
     if not item:
-        raise HTTPException(status_code=404, detail="Item details not found in NetSuite")
+        # Fallback: return local DB data when NetSuite is unavailable
+        logger.warning(f"NetSuite returned no details for item {item_id}, falling back to local DB")
+        local_item = await get_item_by_id(db, int(item_id))
+        if not local_item:
+            local_item = await get_item_by_sku(db, item_sku)
+        if not local_item:
+            raise HTTPException(status_code=404, detail="Item details not found")
+        return ItemDetailsResponse(
+            id=str(local_item.id),
+            name=local_item.name or local_item.sku,
+            sku=local_item.sku,
+            item_type="Unknown",
+            description=local_item.name or "",
+            is_manufacturing=False
+        )
 
     # Clean description: strip SKU prefix if description starts with the SKU
     raw_name = item.get("displayname") or ""

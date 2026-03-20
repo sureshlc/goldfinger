@@ -99,3 +99,22 @@ class AuditEventDB(Base):
         Index("ix_audit_events_timestamp", "timestamp"),
         Index("ix_audit_events_action", "action"),
     )
+
+
+class APIKeyDB(Base):
+    __tablename__ = "api_keys"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(255), nullable=False)
+    key_hash = Column(String(512), unique=True, nullable=False)
+    key_prefix = Column(String(12), nullable=False)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    last_used_at = Column(DateTime(timezone=True), nullable=True)
+    is_active = Column(Boolean, default=True, nullable=False)
+
+    creator = relationship("UserDB")
+
+    __table_args__ = (
+        Index("ix_api_keys_key_hash", "key_hash"),
+    )

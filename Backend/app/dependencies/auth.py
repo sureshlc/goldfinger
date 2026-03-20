@@ -1,16 +1,21 @@
 """
 Authentication Dependencies - DB-backed with role checks and user caching.
+Supports dual auth: JWT Bearer tokens and X-API-Key header.
 """
 import asyncio
+import hashlib
 import time
 from typing import Dict, Optional, Tuple
 from fastapi import Depends, HTTPException, status, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from app.utils.auth import verify_token
 from app.database.users import get_user
+from app.database.connection import get_session_factory
 from app.models.user import User
 
-security = HTTPBearer()
+security = HTTPBearer(auto_error=False)
+
+SERVICE_USER = User(id=0, username="api-service", email="service@api.goldfinger.internal.io", role="service", disabled=False)
 
 # User cache: email -> (User, timestamp)
 _user_cache: Dict[str, Tuple[object, float]] = {}
@@ -38,37 +43,77 @@ async def _get_user_cached(email: str):
     return user
 
 
+async def _authenticate_api_key(api_key: str) -> Optional[User]:
+    """Authenticate via X-API-Key header. Returns SERVICE_USER if valid."""
+    key_hash = hashlib.sha256(api_key.encode()).hexdigest()
+
+    factory = get_session_factory()
+    async with factory() as session:
+        from app.database.repositories.api_key_repo import get_api_key_by_hash, update_last_used
+
+        db_key = await get_api_key_by_hash(session, key_hash)
+        if db_key is None or not db_key.is_active:
+            return None
+
+        await update_last_used(session, db_key.id)
+        await session.commit()
+
+    return SERVICE_USER
+
+
 async def get_current_user(
     request: Request,
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
 ) -> User:
-    """Dependency to get current authenticated user from JWT token."""
-    token = credentials.credentials
+    """Dependency to get current authenticated user from JWT token or API key."""
 
-    username = verify_token(token)
-    if username is None:
+    # Path A: JWT Bearer token
+    if credentials is not None:
+        token = credentials.credentials
+
+        username = verify_token(token)
+        if username is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Could not validate credentials",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+        user = await _get_user_cached(username)
+        if user is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="User not found",
+            )
+
+        if user.disabled:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Inactive user",
+            )
+
+        current_user = User(**user.dict())
+        request.state.user = current_user
+        return current_user
+
+    # Path B: X-API-Key header
+    api_key = request.headers.get("X-API-Key")
+    if api_key:
+        user = await _authenticate_api_key(api_key)
+        if user is not None:
+            request.state.user = user
+            return user
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Could not validate credentials",
-            headers={"WWW-Authenticate": "Bearer"},
+            detail="Invalid or revoked API key",
         )
 
-    user = await _get_user_cached(username)
-    if user is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User not found",
-        )
-
-    if user.disabled:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Inactive user",
-        )
-
-    current_user = User(**user.dict())
-    request.state.user = current_user
-    return current_user
+    # Path C: No credentials
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Not authenticated",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
 
 
 async def get_admin_user(

@@ -3,7 +3,7 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { ArrowLeft, Eye, EyeOff, Upload, Download, X, Check, X as XIcon } from "lucide-react";
+import { ArrowLeft, Eye, EyeOff, Upload, Download, X, Check, X as XIcon, Key, Copy, ClipboardCheck } from "lucide-react";
 import { useAuth } from "../contexts/AuthContext";
 import { fetchWithAuth, API_BASE_URL } from "../services/auth";
 
@@ -20,7 +20,7 @@ function usePasswordStrength(password: string) {
   }, [password]);
 }
 
-type Tab = "audit-logs" | "items" | "users";
+type Tab = "audit-logs" | "items" | "users" | "api-keys";
 
 interface AuditLog {
   timestamp: string;
@@ -34,6 +34,16 @@ interface AdminItem {
   id: number;
   sku: string;
   name: string | null;
+}
+
+interface APIKeyItem {
+  id: number;
+  name: string;
+  key_prefix: string;
+  is_active: boolean;
+  created_by: number;
+  created_at: string | null;
+  last_used_at: string | null;
 }
 
 interface AdminUser {
@@ -76,6 +86,7 @@ export default function AdminPage() {
     { key: "audit-logs", label: "Audit Logs" },
     { key: "items", label: "Manage Items" },
     { key: "users", label: "Manage Users" },
+    { key: "api-keys", label: "API Keys" },
   ];
 
   return (
@@ -111,6 +122,7 @@ export default function AdminPage() {
         {activeTab === "audit-logs" && <AuditLogsTab />}
         {activeTab === "items" && <ItemsTab />}
         {activeTab === "users" && <UsersTab />}
+        {activeTab === "api-keys" && <APIKeysTab />}
       </div>
     </div>
   );
@@ -162,6 +174,10 @@ function AuditLogsTab() {
     item_deleted: { label: "Item Deleted", color: "bg-red-100 text-red-700" },
     items_imported: { label: "Bulk Import", color: "bg-purple-100 text-purple-700" },
     production_check: { label: "Production Check", color: "bg-indigo-100 text-indigo-700" },
+    api_key_created: { label: "API Key Created", color: "bg-green-100 text-green-700" },
+    api_key_revoked: { label: "API Key Revoked", color: "bg-orange-100 text-orange-700" },
+    api_key_activated: { label: "API Key Activated", color: "bg-blue-100 text-blue-700" },
+    api_key_deleted: { label: "API Key Deleted", color: "bg-red-100 text-red-700" },
   };
 
   return (
@@ -1030,6 +1046,264 @@ function UsersTab() {
               </tbody>
             </table>
           </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ============================================================================
+// API KEYS TAB
+// ============================================================================
+function APIKeysTab() {
+  const [apiKeys, setApiKeys] = useState<APIKeyItem[]>([]);
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [newKeyName, setNewKeyName] = useState("");
+  const [generatedKey, setGeneratedKey] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const perPage = 20;
+
+  const fetchApiKeys = useCallback(async () => {
+    setLoading(true);
+    try {
+      const res = await fetchWithAuth(
+        `${API_BASE_URL}/admin/api-keys?page=${page}&per_page=${perPage}`
+      );
+      const data = await res.json();
+      setApiKeys(data.api_keys || []);
+      setTotal(data.total || 0);
+    } catch {
+      /* ignore */
+    } finally {
+      setLoading(false);
+    }
+  }, [page]);
+
+  useEffect(() => {
+    fetchApiKeys();
+  }, [fetchApiKeys]);
+
+  const handleCreate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newKeyName.trim()) return;
+    setCreating(true);
+    try {
+      const res = await fetchWithAuth(`${API_BASE_URL}/admin/api-keys`, {
+        method: "POST",
+        body: JSON.stringify({ name: newKeyName.trim() }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setGeneratedKey(data.key);
+        setNewKeyName("");
+        fetchApiKeys();
+      }
+    } catch {
+      /* ignore */
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const handleRevoke = async (id: number) => {
+    try {
+      await fetchWithAuth(`${API_BASE_URL}/admin/api-keys/${id}/revoke`, { method: "PUT" });
+      fetchApiKeys();
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const handleActivate = async (id: number) => {
+    try {
+      await fetchWithAuth(`${API_BASE_URL}/admin/api-keys/${id}/activate`, { method: "PUT" });
+      fetchApiKeys();
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const handleDelete = async (id: number) => {
+    if (!confirm("Permanently delete this API key? This cannot be undone.")) return;
+    try {
+      await fetchWithAuth(`${API_BASE_URL}/admin/api-keys/${id}`, { method: "DELETE" });
+      fetchApiKeys();
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const handleCopyKey = async () => {
+    if (!generatedKey) return;
+    try {
+      await navigator.clipboard.writeText(generatedKey);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const totalPages = Math.ceil(total / perPage);
+
+  return (
+    <div>
+      {/* Create new key form */}
+      <form onSubmit={handleCreate} className="flex items-end gap-3 mb-4">
+        <div className="flex-1 max-w-sm">
+          <label className="block text-xs font-medium text-gray-600 mb-1">Key Name</label>
+          <input
+            type="text"
+            value={newKeyName}
+            onChange={(e) => setNewKeyName(e.target.value)}
+            placeholder='e.g. "MES Production"'
+            required
+            className="border border-gray-300 rounded-lg px-3 py-2 text-sm w-full focus:outline-none focus:ring-2 focus:ring-blue-500"
+          />
+        </div>
+        <button
+          type="submit"
+          disabled={creating || !newKeyName.trim()}
+          className="inline-flex items-center gap-1.5 bg-blue-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50"
+        >
+          <Key className="w-4 h-4" />
+          {creating ? "Generating..." : "Generate Key"}
+        </button>
+      </form>
+
+      {/* Generated key display */}
+      {generatedKey && (
+        <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 mb-4">
+          <div className="flex items-start gap-3">
+            <div className="flex-1">
+              <p className="text-sm font-semibold text-yellow-800 mb-1">
+                Save this key now — it won&apos;t be shown again
+              </p>
+              <div className="flex items-center gap-2">
+                <code className="bg-white border border-yellow-300 rounded px-3 py-1.5 text-sm font-mono text-gray-900 select-all break-all">
+                  {generatedKey}
+                </code>
+                <button
+                  type="button"
+                  onClick={handleCopyKey}
+                  className="inline-flex items-center gap-1 px-3 py-1.5 text-sm font-medium rounded-lg border border-yellow-300 bg-white text-yellow-800 hover:bg-yellow-100"
+                >
+                  {copied ? <ClipboardCheck className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                  {copied ? "Copied" : "Copy"}
+                </button>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => { setGeneratedKey(null); setCopied(false); }}
+              className="text-yellow-600 hover:text-yellow-800"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* API Keys table */}
+      <div className="bg-white rounded-xl shadow border border-gray-200 overflow-hidden">
+        {loading ? (
+          <div className="p-8 text-center text-gray-500">Loading...</div>
+        ) : apiKeys.length === 0 ? (
+          <div className="p-8 text-center text-gray-500">No API keys yet. Create one above.</div>
+        ) : (
+          <>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="bg-gray-50 border-b border-gray-100">
+                  <tr>
+                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Name</th>
+                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Key Prefix</th>
+                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Status</th>
+                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Created</th>
+                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Last Used</th>
+                    <th className="px-4 py-3 text-right text-xs font-semibold text-gray-500 uppercase tracking-wide">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-50">
+                  {apiKeys.map((k) => (
+                    <tr key={k.id} className="hover:bg-blue-50/50 transition">
+                      <td className="px-4 py-2.5 text-gray-900 font-medium">{k.name}</td>
+                      <td className="px-4 py-2.5">
+                        <code className="text-xs bg-gray-100 px-2 py-0.5 rounded font-mono text-gray-700">{k.key_prefix}...</code>
+                      </td>
+                      <td className="px-4 py-2.5">
+                        <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${
+                          k.is_active ? "bg-green-100 text-green-700" : "bg-gray-100 text-gray-500"
+                        }`}>
+                          {k.is_active ? "Active" : "Revoked"}
+                        </span>
+                      </td>
+                      <td className="px-4 py-2.5 text-gray-600 text-xs whitespace-nowrap">
+                        {k.created_at ? new Date(k.created_at).toLocaleDateString() : "-"}
+                      </td>
+                      <td className="px-4 py-2.5 text-gray-600 text-xs whitespace-nowrap">
+                        {k.last_used_at ? new Date(k.last_used_at).toLocaleString() : "Never"}
+                      </td>
+                      <td className="px-4 py-2.5 text-right">
+                        {k.is_active ? (
+                          <button
+                            onClick={() => handleRevoke(k.id)}
+                            className="text-orange-600 hover:text-orange-700 text-sm font-medium mr-3"
+                            type="button"
+                          >
+                            Revoke
+                          </button>
+                        ) : (
+                          <button
+                            onClick={() => handleActivate(k.id)}
+                            className="text-green-600 hover:text-green-700 text-sm font-medium mr-3"
+                            type="button"
+                          >
+                            Activate
+                          </button>
+                        )}
+                        <button
+                          onClick={() => handleDelete(k.id)}
+                          className="text-red-600 hover:text-red-700 text-sm font-medium"
+                          type="button"
+                        >
+                          Delete
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {totalPages > 1 && (
+              <div className="flex items-center justify-between px-4 py-3 border-t border-gray-100 bg-gray-50">
+                <span className="text-sm text-gray-500">
+                  Page {page} of {totalPages} ({total} total)
+                </span>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setPage((p) => Math.max(1, p - 1))}
+                    disabled={page <= 1}
+                    className="px-3 py-1 text-sm border border-gray-200 rounded-lg hover:bg-gray-100 disabled:opacity-50 transition"
+                    type="button"
+                  >
+                    Prev
+                  </button>
+                  <button
+                    onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                    disabled={page >= totalPages}
+                    className="px-3 py-1 text-sm border border-gray-200 rounded-lg hover:bg-gray-100 disabled:opacity-50 transition"
+                    type="button"
+                  >
+                    Next
+                  </button>
+                </div>
+              </div>
+            )}
+          </>
         )}
       </div>
     </div>
