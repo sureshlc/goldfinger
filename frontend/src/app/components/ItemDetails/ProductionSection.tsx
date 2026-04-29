@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState, useEffect } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, usePathname } from "next/navigation";
 
 export interface BOMComponent {
   item_id: string;
@@ -65,6 +65,7 @@ const ProductionSection: React.FC<ProductionSectionProps> = ({
   isExpanded = false,
 }) => {
   const router = useRouter();
+  const pathname = usePathname();
   const [quantity, setQuantity] = useState(currentQuantity.toString());
   const [isUpdating, setIsUpdating] = useState(false);
   const [showAllComponents, setShowAllComponents] = useState(isExpanded);
@@ -103,7 +104,8 @@ const ProductionSection: React.FC<ProductionSectionProps> = ({
     const newQty = parseInt(quantity) || 1;
     if (newQty !== currentQuantity && newQty > 0) {
       setIsUpdating(true);
-      router.push(`/item/${sku}?quantity=${newQty}`);
+      const urlSku = pathname?.split("/item/")[1]?.split("?")[0] || sku;
+      router.push(`/item/${urlSku}?quantity=${newQty}`);
     }
   };
 
