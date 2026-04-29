@@ -89,8 +89,13 @@ class LocalSKUResolver:
                 await upsert_item(session, int(item_id), sku, name)
                 await session.commit()
 
-            self.sku_to_id[str(sku).strip()] = str(item_id).strip()
-            self.id_to_sku[str(item_id).strip()] = str(sku).strip()
+            item_id_str = str(item_id).strip()
+            sku_str = str(sku).strip()
+            old_sku = self.id_to_sku.get(item_id_str)
+            if old_sku and old_sku != sku_str:
+                self.sku_to_id.pop(old_sku, None)
+            self.sku_to_id[sku_str] = item_id_str
+            self.id_to_sku[item_id_str] = sku_str
             logger.info(f"Saved item {item_id} ({sku}) to DB and cache")
         except Exception as e:
             logger.error(f"Failed to save item to DB: {e}")

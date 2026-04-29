@@ -8,6 +8,33 @@ from app.utils.local_sku_resolver import get_local_resolver
 logger = logging.getLogger(__name__)
 
 
+async def _verify_local_match(identifier: str, item_id: str, bom_service) -> bool:
+    """
+    Confirm that the locally-resolved internal id still maps to the user's SKU
+    in NetSuite. If NetSuite reports a different itemid, the local row is stale —
+    update it so the in-memory + DB caches reflect reality, and signal the caller
+    to fall through to a fresh NetSuite SKU lookup.
+    """
+    if identifier.isdigit():
+        return True
+
+    details = await bom_service.get_item_details(item_id)
+    if not details:
+        return True
+
+    netsuite_sku = (details.get("itemid") or "").strip()
+    if not netsuite_sku or netsuite_sku.upper() == identifier.upper():
+        return True
+
+    logger.warning(
+        f"Stale local mapping: identifier={identifier} -> id={item_id} but NetSuite "
+        f"reports itemid={netsuite_sku}. Healing local cache."
+    )
+    name = details.get("description") or details.get("displayname") or ""
+    await get_local_resolver().save_item(item_id, netsuite_sku, name)
+    return False
+
+
 async def resolve_sku_or_id(identifier: str, bom_service) -> Optional[str]:
     """
     Resolve SKU or ID to internal ID.
@@ -20,14 +47,16 @@ async def resolve_sku_or_id(identifier: str, bom_service) -> Optional[str]:
     # 1. Try in-memory cache
     local_id = local_resolver.get_id_by_sku(identifier)
     if local_id:
-        logger.info(f"Resolved {identifier} -> {local_id} from cache")
-        return local_id
+        if await _verify_local_match(identifier, local_id, bom_service):
+            logger.info(f"Resolved {identifier} -> {local_id} from cache")
+            return local_id
 
     # 2. Try DB lookup on cache miss
     db_id = await local_resolver.db_lookup_by_sku(identifier)
     if db_id:
-        logger.info(f"Resolved {identifier} -> {db_id} from database")
-        return db_id
+        if await _verify_local_match(identifier, db_id, bom_service):
+            logger.info(f"Resolved {identifier} -> {db_id} from database")
+            return db_id
 
     # 3. If numeric ID, check cache/DB/NetSuite
     if identifier.isdigit():
