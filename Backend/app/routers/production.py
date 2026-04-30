@@ -56,6 +56,7 @@ class MaterialContention(BaseModel):
     total_demanded: float
     shortage: float
     demanded_by: List[dict]  # [{ sku, quantity_needed }]
+    unit: Optional[str] = ""
 
 class BatchItemResult(BaseModel):
     item_sku: str

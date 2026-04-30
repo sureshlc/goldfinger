@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { ArrowLeft, AlertTriangle } from "lucide-react";
 import ItemDetails from "@/app/components/ItemDetails/ItemDetails";
 import { fetchWithAuth } from "@/app/services/auth";
@@ -26,11 +26,20 @@ export default function ItemDetailClient({
   sku: string;
   desiredQuantity: number;
 }) {
+  const router = useRouter();
   const [item, setItem] = useState<ItemData | null>(null);
   const [inventory, setInventory] = useState(null);
   const [production, setProduction] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  const handleBack = () => {
+    if (typeof window !== "undefined" && window.history.length > 1) {
+      router.back();
+    } else {
+      router.push("/");
+    }
+  };
 
   useEffect(() => {
     const fetchData = async () => {
@@ -75,9 +84,13 @@ export default function ItemDetailClient({
     return (
       <div className="min-h-[calc(100vh-5rem)] bg-gradient-to-b from-blue-50 to-white px-4 pt-8">
         <div className="max-w-4xl mx-auto">
-          <Link href="/" className="inline-flex items-center gap-1.5 text-sm text-blue-600 hover:text-blue-700 mb-4 transition">
-            <ArrowLeft className="w-4 h-4" /> Back to Home
-          </Link>
+          <button
+            type="button"
+            onClick={handleBack}
+            className="inline-flex items-center gap-1.5 text-sm text-blue-600 hover:text-blue-700 mb-4 transition"
+          >
+            <ArrowLeft className="w-4 h-4" /> Back
+          </button>
           <Loading />
         </div>
       </div>
@@ -88,9 +101,13 @@ export default function ItemDetailClient({
     return (
       <div className="min-h-[calc(100vh-5rem)] bg-gradient-to-b from-blue-50 to-white px-4 pt-8">
         <div className="max-w-4xl mx-auto">
-          <Link href="/" className="inline-flex items-center gap-1.5 text-sm text-blue-600 hover:text-blue-700 mb-4 transition">
-            <ArrowLeft className="w-4 h-4" /> Back to Home
-          </Link>
+          <button
+            type="button"
+            onClick={handleBack}
+            className="inline-flex items-center gap-1.5 text-sm text-blue-600 hover:text-blue-700 mb-4 transition"
+          >
+            <ArrowLeft className="w-4 h-4" /> Back
+          </button>
           <div className="bg-white rounded-xl shadow border border-gray-200 p-8 text-center">
             <div className="w-14 h-14 bg-red-100 rounded-full flex items-center justify-center mx-auto mb-4">
               <AlertTriangle className="w-7 h-7 text-red-600" />
@@ -106,9 +123,13 @@ export default function ItemDetailClient({
   return (
     <div className="min-h-[calc(100vh-5rem)] bg-gradient-to-b from-blue-50 to-white px-4 pt-8 pb-8">
       <div className="max-w-4xl mx-auto">
-        <Link href="/" className="inline-flex items-center gap-1.5 text-sm text-blue-600 hover:text-blue-700 mb-4 transition">
-          <ArrowLeft className="w-4 h-4" /> Back to Home
-        </Link>
+        <button
+          type="button"
+          onClick={handleBack}
+          className="inline-flex items-center gap-1.5 text-sm text-blue-600 hover:text-blue-700 mb-4 transition"
+        >
+          <ArrowLeft className="w-4 h-4" /> Back
+        </button>
         <ItemDetails
           sku={item.sku || sku}
           name={item.description || item.name}

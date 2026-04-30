@@ -307,7 +307,7 @@ const ProductionSection: React.FC<ProductionSectionProps> = ({
                       </div>
                       <div>
                         <p className="text-gray-500">Available</p>
-                        <p className="font-semibold">{comp.display_quantity || formatAvailable(comp.available_quantity)}</p>
+                        <p className="font-semibold">{comp.display_quantity || formatAvailable(comp.available_quantity)} {comp.unit}</p>
                       </div>
                       <div>
                         <p className="text-gray-500">Max Units</p>

@@ -4,9 +4,9 @@ import React, { useState, useEffect, Suspense, useRef } from "react";
 import Link from "next/link";
 import Image from "next/image";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { ChevronDown, User, Settings, LogOut, Search, X } from "lucide-react";
-import SearchInput from "./components/SearchInput";
-import { fetchItemSuggestions } from "./services/search";
+import { ChevronDown, User, Settings, LogOut, Search, X, Plus, Layers } from "lucide-react";
+import SkuAutocomplete from "./components/SkuAutocomplete";
+import MultiSkuPanel, { SkuRow, validRowsOf } from "./components/MultiSkuPanel";
 import { useAuth } from "./contexts/AuthContext";
 
 function HeaderContent() {
@@ -24,8 +24,95 @@ function HeaderContent() {
   const previousPathname = useRef("");
 
   const [homeSearchVisible, setHomeSearchVisible] = useState(true);
+  const [multiMode, setMultiMode] = useState(false);
+  const [multiOpen, setMultiOpen] = useState(false);
+  const [multiRows, setMultiRows] = useState<SkuRow[]>([
+    { sku: "", qty: "1" },
+    { sku: "", qty: "1" },
+  ]);
+  const lastSeededItemsRef = useRef<string>("");
+  const multiContainerRef = useRef<HTMLDivElement>(null);
 
-  const showSearch = pathname?.startsWith("/item/");
+  const isMultiAnalyzePage = pathname?.startsWith("/multi-analyze") ?? false;
+
+  const enterMultiMode = () => {
+    setMultiRows((prev) => {
+      const seeded = [...prev];
+      const seededSku = query.trim().toUpperCase();
+      if (seededSku && !seeded[0].sku) {
+        seeded[0] = { sku: seededSku, qty: quantity || "1" };
+      }
+      return seeded;
+    });
+    setMultiMode(true);
+    setMultiOpen(true);
+  };
+
+  // Closing only collapses the dropdown; keeps multi-mode if we're already on the results page.
+  const closeMultiPanel = () => setMultiOpen(false);
+
+  // Clear the batch and leave multi-mode so the user can start fresh — but stay on the page.
+  const exitMultiMode = () => {
+    setMultiOpen(false);
+    setMultiMode(false);
+    setMultiRows([
+      { sku: "", qty: "1" },
+      { sku: "", qty: "1" },
+    ]);
+    setQuery("");
+    setQuantity("1");
+    // Keep ref equal to the current URL items so auto-seed doesn't re-enter multi-mode.
+    lastSeededItemsRef.current = searchParams.get("items") || "";
+  };
+
+  // Auto-seed multi-mode from URL when landing on /multi-analyze. Panel stays collapsed by default.
+  useEffect(() => {
+    if (!isMultiAnalyzePage) {
+      // Leaving the results page: drop multi-mode unless user is actively editing in dropdown.
+      if (multiMode && !multiOpen) {
+        setMultiMode(false);
+        lastSeededItemsRef.current = "";
+      }
+      return;
+    }
+    const itemsParam = searchParams.get("items") || "";
+    if (itemsParam === lastSeededItemsRef.current) return;
+    lastSeededItemsRef.current = itemsParam;
+    const parsed = itemsParam
+      .split(",")
+      .map((p) => p.trim())
+      .filter(Boolean)
+      .map((p) => {
+        const [skuRaw, qtyRaw] = p.split(":");
+        return {
+          sku: decodeURIComponent(skuRaw || "").toUpperCase(),
+          qty: (qtyRaw || "1").trim(),
+        };
+      })
+      .filter((r) => r.sku.length > 0);
+    if (parsed.length === 0) return;
+    setMultiRows(parsed.length === 1 ? [...parsed, { sku: "", qty: "1" }] : parsed);
+    setMultiMode(true);
+    // Do NOT auto-open the panel — show the compact summary bar instead.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isMultiAnalyzePage, searchParams]);
+
+  // Click outside the multi-panel area closes the dropdown (but keeps multi-mode).
+  useEffect(() => {
+    if (!multiOpen) return;
+    const handler = (event: MouseEvent) => {
+      if (
+        multiContainerRef.current &&
+        !multiContainerRef.current.contains(event.target as Node)
+      ) {
+        setMultiOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [multiOpen]);
+
+  const showSearch = pathname?.startsWith("/item/") || isMultiAnalyzePage;
   const isHomePage = pathname === "/";
   const showHomeSearch = isHomePage && !homeSearchVisible;
 
@@ -46,7 +133,7 @@ function HeaderContent() {
     }
   }, [isHomePage]);
 
-  // Close dropdown on click outside
+  // Close user dropdown on click outside
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
       if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
@@ -170,6 +257,40 @@ function HeaderContent() {
     );
   }
 
+  // Compact bar shown when in multi-mode but the panel is collapsed.
+  function MultiCompactBar({ wide }: { wide: boolean }) {
+    const valid = validRowsOf(multiRows);
+    const count = valid.length;
+    const summary = (() => {
+      if (count === 0) return "Add SKUs to your batch";
+      if (count === 1) return valid[0].sku;
+      if (count === 2) return `${valid[0].sku} · ${valid[1].sku}`;
+      return `${valid[0].sku} · +${count - 2} · ${valid[count - 1].sku}`;
+    })();
+    return (
+      <button
+        type="button"
+        onClick={() => setMultiOpen((v) => !v)}
+        className={`flex items-center gap-2 bg-gray-50 rounded-lg border border-gray-200 px-3 py-1.5 ${
+          wide ? "flex-1 min-w-0" : "flex-1 min-w-0"
+        } hover:border-blue-300 hover:bg-blue-50/40 transition text-left`}
+        aria-label={multiOpen ? "Collapse multi-SKU batch editor" : "Expand multi-SKU batch editor"}
+        aria-expanded={multiOpen}
+      >
+        <Layers className="w-4 h-4 text-blue-500 flex-shrink-0" />
+        <span className="text-sm font-medium text-gray-900 flex-shrink-0">
+          {count} {count === 1 ? "SKU" : "SKUs"}
+        </span>
+        <span className="text-sm text-gray-500 truncate">{summary}</span>
+        <ChevronDown
+          className={`w-4 h-4 text-gray-400 flex-shrink-0 ml-auto transition-transform ${
+            multiOpen ? "rotate-180" : ""
+          }`}
+        />
+      </button>
+    );
+  }
+
   return (
     <header className="bg-white/95 backdrop-blur-sm border-b border-gray-200 shadow-sm sticky top-0 z-50">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -191,85 +312,156 @@ function HeaderContent() {
             </div>
           </Link>
 
-          {/* Search Section - Only on item pages */}
+          {/* Search Section - Only on item / multi-analyze pages */}
           {showSearch && (
-            <div className="flex items-center gap-2 flex-1 mx-2 sm:mx-4 justify-center max-w-3xl">
-              {/* Search Input - grows to fill, min-width on mobile */}
-              <div className="flex items-center gap-2 bg-gray-50 rounded-lg border border-gray-200 px-3 py-1.5 flex-1 min-w-0 focus-within:border-blue-400 focus-within:ring-2 focus-within:ring-blue-100 transition">
-                <Search className="w-4 h-4 text-gray-400 flex-shrink-0" />
-                <div className="flex-1 min-w-0">
-                  <SearchInput
-                    fetchSuggestions={fetchItemSuggestions}
-                    onSelect={handleSelect}
-                    placeholder="Search SKU..."
-                    minQueryLength={2}
+            <div
+              ref={multiMode ? multiContainerRef : undefined}
+              className="flex items-center gap-2 flex-1 mx-2 sm:mx-4 justify-center max-w-3xl relative"
+            >
+              {!multiMode && (
+                <>
+                  <div className="relative flex items-center gap-2 bg-gray-50 rounded-lg border border-gray-200 px-3 py-1.5 flex-1 min-w-0 focus-within:border-blue-400 focus-within:ring-2 focus-within:ring-blue-100 transition">
+                    <Search className="w-4 h-4 text-gray-400 flex-shrink-0" />
+                    <div className="flex-1 min-w-0">
+                      <SkuAutocomplete
+                        value={query}
+                        onChange={setQuery}
+                        onSelect={handleSelect}
+                        onSubmit={handleAnalyze}
+                        placeholder="Search SKU..."
+                      />
+                    </div>
+                  </div>
+
+                  <input
+                    type="number"
+                    min="1"
+                    value={quantity}
+                    onChange={(e) => setQuantity(e.target.value)}
+                    onKeyPress={handleQuantityKeyPress}
+                    disabled={isAnalyzing}
+                    placeholder="Qty"
+                    className="w-16 bg-gray-50 border border-gray-200 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-400 disabled:text-gray-400 flex-shrink-0"
+                  />
+
+                  <button
+                    type="button"
+                    onClick={enterMultiMode}
+                    disabled={!query.trim()}
+                    title={query.trim() ? "Add multiple SKUs" : "Enter a SKU first to start a batch"}
+                    aria-label="Add multiple SKUs"
+                    className="flex-shrink-0 inline-flex items-center justify-center w-9 h-9 rounded-lg bg-gray-50 border border-gray-200 text-gray-500 hover:text-blue-600 hover:border-blue-200 transition disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-gray-500 disabled:hover:border-gray-200"
+                  >
+                    <Plus className="w-4 h-4" />
+                  </button>
+                  <AnalyzeButton
                     query={query}
-                    setQuery={setQuery}
+                    onAnalyze={handleAnalyze}
+                    isAnalyzing={isAnalyzing}
+                  />
+                </>
+              )}
+
+              {multiMode && (
+                <>
+                  <MultiCompactBar wide />
+                  <button
+                    type="button"
+                    onClick={exitMultiMode}
+                    title={isMultiAnalyzePage ? "Close batch editor" : "Exit multi-SKU mode"}
+                    aria-label={isMultiAnalyzePage ? "Close batch editor" : "Exit multi-SKU mode"}
+                    className="flex-shrink-0 inline-flex items-center justify-center w-9 h-9 rounded-lg bg-gray-50 border border-gray-200 text-gray-500 hover:text-red-600 hover:border-red-200 transition"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </>
+              )}
+
+              {multiMode && multiOpen && (
+                <div className="absolute top-full left-0 right-0 mt-2 z-50">
+                  <MultiSkuPanel
+                    rows={multiRows}
+                    setRows={setMultiRows}
+                    onClose={closeMultiPanel}
+                    variant="card"
+                    hideClose
                   />
                 </div>
-              </div>
-
-              {/* Quantity */}
-              <div className="flex items-center gap-1.5 bg-gray-50 rounded-lg border border-gray-200 px-2.5 py-1.5 flex-shrink-0">
-                <label className="text-xs font-medium text-gray-500 whitespace-nowrap hidden sm:block">Qty</label>
-                <input
-                  type="number"
-                  min="1"
-                  value={quantity}
-                  onChange={(e) => setQuantity(e.target.value)}
-                  onKeyPress={handleQuantityKeyPress}
-                  disabled={isAnalyzing}
-                  className="w-14 sm:w-16 bg-transparent border-none text-sm font-medium focus:outline-none disabled:text-gray-400"
-                />
-                {quantity !== "1" && (
-                  <button
-                    onClick={handleResetQuantity}
-                    disabled={isAnalyzing}
-                    className="text-gray-400 hover:text-gray-600 transition disabled:opacity-50"
-                    title="Reset to 1"
-                    type="button"
-                  >
-                    <X className="w-3.5 h-3.5" />
-                  </button>
-                )}
-              </div>
-
-              <AnalyzeButton
-                query={query}
-                onAnalyze={handleAnalyze}
-                isAnalyzing={isAnalyzing}
-              />
+              )}
             </div>
           )}
 
           {/* Home page - show search when main search scrolls away */}
           {!showSearch && showHomeSearch && (
-            <div className="flex items-center gap-2 flex-1 justify-center max-w-lg mx-4">
-              <div className="flex items-center gap-2 bg-gray-50 rounded-lg border border-gray-200 px-3 py-1.5 flex-1 focus-within:border-blue-400 focus-within:ring-2 focus-within:ring-blue-100 transition">
-                <Search className="w-4 h-4 text-gray-400 flex-shrink-0" />
-                <div className="flex-1 min-w-0">
-                  <SearchInput
-                    fetchSuggestions={fetchItemSuggestions}
-                    onSelect={handleHomeSelect}
-                    placeholder="Search by SKU..."
-                    minQueryLength={2}
-                    query={query}
-                    setQuery={setQuery}
+            <div
+              ref={multiMode ? multiContainerRef : undefined}
+              className="flex items-center gap-2 mx-4 relative"
+            >
+              {!multiMode && (
+                <>
+                  <div className="relative flex items-center gap-2 bg-gray-50 rounded-lg border border-gray-200 px-3 py-1.5 flex-1 min-w-0 focus-within:border-blue-400 focus-within:ring-2 focus-within:ring-blue-100 transition">
+                    <Search className="w-4 h-4 text-gray-400 flex-shrink-0" />
+                    <div className="flex-1 min-w-0">
+                      <SkuAutocomplete
+                        value={query}
+                        onChange={setQuery}
+                        onSelect={handleHomeSelect}
+                        onSubmit={handleHomeSearch}
+                        placeholder="Search by SKU..."
+                      />
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={enterMultiMode}
+                    disabled={!query.trim()}
+                    title={query.trim() ? "Add multiple SKUs" : "Enter a SKU first to start a batch"}
+                    aria-label="Add multiple SKUs"
+                    className="flex-shrink-0 inline-flex items-center justify-center w-9 h-9 rounded-lg bg-gray-50 border border-gray-200 text-gray-500 hover:text-blue-600 hover:border-blue-200 transition disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-gray-500 disabled:hover:border-gray-200"
+                  >
+                    <Plus className="w-4 h-4" />
+                  </button>
+                  <button
+                    onClick={handleHomeSearch}
+                    disabled={!query.trim()}
+                    className={`px-4 py-2 font-semibold rounded-lg transition text-sm ${
+                      query.trim()
+                        ? "bg-blue-600 text-white hover:bg-blue-700 shadow-sm"
+                        : "bg-gray-200 text-gray-400 cursor-not-allowed"
+                    }`}
+                    type="button"
+                  >
+                    Search
+                  </button>
+                </>
+              )}
+
+              {multiMode && (
+                <>
+                  <MultiCompactBar wide />
+                  <button
+                    type="button"
+                    onClick={exitMultiMode}
+                    title="Exit multi-SKU mode"
+                    aria-label="Exit multi-SKU mode"
+                    className="flex-shrink-0 inline-flex items-center justify-center w-9 h-9 rounded-lg bg-gray-50 border border-gray-200 text-gray-500 hover:text-red-600 hover:border-red-200 transition"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </>
+              )}
+
+              {multiMode && multiOpen && (
+                <div className="absolute top-full left-0 right-0 mt-2 z-50">
+                  <MultiSkuPanel
+                    rows={multiRows}
+                    setRows={setMultiRows}
+                    onClose={closeMultiPanel}
+                    variant="card"
+                    hideClose
                   />
                 </div>
-              </div>
-              <button
-                onClick={handleHomeSearch}
-                disabled={!query.trim()}
-                className={`px-4 py-2 font-semibold rounded-lg transition text-sm ${
-                  query.trim()
-                    ? "bg-blue-600 text-white hover:bg-blue-700 shadow-sm"
-                    : "bg-gray-200 text-gray-400 cursor-not-allowed"
-                }`}
-                type="button"
-              >
-                Search
-              </button>
+              )}
             </div>
           )}
 

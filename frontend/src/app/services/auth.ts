@@ -1,3 +1,5 @@
+import { emitToast } from '../components/toast/ToastContext';
+
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000/api/v1';
 
 export interface LoginResponse {
@@ -36,15 +38,23 @@ export async function fetchWithAuth(url: string, options: RequestInit = {}) {
       headers,
     });
   
-    // If unauthorized, clear token and redirect to login
+    // If unauthorized, clear token and redirect to login (with returnTo + reason)
     if (response.status === 401 || response.status === 403) {
       if (typeof window !== 'undefined') {
         localStorage.removeItem('auth_token');
-        window.location.href = '/login';
+        const here = window.location.pathname + window.location.search;
+        const params = new URLSearchParams({ reason: 'expired' });
+        if (here && here !== '/login') params.set('returnTo', here);
+        emitToast('info', 'Your session expired. Redirecting to login…');
+        window.location.href = `/login?${params.toString()}`;
       }
       throw new Error('Unauthorized');
     }
-  
+
+    if (response.status >= 500) {
+      emitToast('error', 'Server error — please try again in a moment.');
+    }
+
     return response;
   }
 

@@ -33,10 +33,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         return;
       }
 
+      const buildLoginUrl = (reason: string) => {
+        const here = window.location.pathname + window.location.search;
+        const params = new URLSearchParams({ reason });
+        if (here && here !== "/login") params.set("returnTo", here);
+        return `/login?${params.toString()}`;
+      };
+
       try {
         // Check if user has a token
         if (!AuthService.isAuthenticated()) {
-          router.push("/login");
+          router.push(buildLoginUrl("required"));
           setIsLoading(false);
           return;
         }
@@ -48,7 +55,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       } catch (_error) {
         // Token invalid or expired, redirect to login
         AuthService.logout();
-        router.push("/login");
+        router.push(buildLoginUrl("expired"));
         setIsLoading(false);
       }
     };

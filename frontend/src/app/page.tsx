@@ -1,10 +1,10 @@
 "use client";
 
-import React, { useCallback, useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
-import { Search, CheckCircle2, BarChart3, AlertTriangle, ArrowRight, Clock } from "lucide-react";
-import SearchInput from "./components/SearchInput";
-import { fetchItemSuggestions } from "./services/search";
+import { Search, CheckCircle2, BarChart3, AlertTriangle, ArrowRight, Clock, Plus } from "lucide-react";
+import SkuAutocomplete from "./components/SkuAutocomplete";
+import MultiSkuPanel, { SkuRow } from "./components/MultiSkuPanel";
 import { fetchWithAuth, API_BASE_URL } from "./services/auth";
 
 interface TopItem {
@@ -32,12 +32,30 @@ export default function Home() {
   const router = useRouter();
 
   const [query, setQuery] = useState("");
+  const [searchQty, setSearchQty] = useState("1");
   const [isSearching, setIsSearching] = useState(false);
   const [topItems, setTopItems] = useState<TopItem[]>([]);
   const [topItemsLoading, setTopItemsLoading] = useState(true);
   const [quantities, setQuantities] = useState<Record<string, string>>({});
+  const [multiMode, setMultiMode] = useState(false);
+  const [multiRows, setMultiRows] = useState<SkuRow[]>([
+    { sku: "", qty: "1" },
+    { sku: "", qty: "1" },
+  ]);
   const searchCardRef = useRef<HTMLDivElement>(null);
-  const memoizedFetchSuggestions = useCallback(fetchItemSuggestions, []);
+
+  const enterMultiMode = () => {
+    const seededSku = query.trim().toUpperCase();
+    if (!seededSku) return; // Require an item before entering multi-mode
+    const seededQty = searchQty && searchQty.trim().length > 0 ? searchQty : "1";
+    setMultiRows((prev) => {
+      const seeded = [...prev];
+      seeded[0] = { sku: seededSku, qty: seededQty };
+      return seeded;
+    });
+    setMultiMode(true);
+  };
+  const exitMultiMode = () => setMultiMode(false);
 
   // Track when search card scrolls behind the sticky header
   useEffect(() => {
@@ -82,10 +100,16 @@ export default function Home() {
     fetchTopItems();
   }, []);
 
+  const buildItemHref = (sku: string) => {
+    const qty = parseInt(searchQty, 10);
+    const safeQty = Number.isFinite(qty) && qty > 0 ? qty : 1;
+    return `/item/${encodeURIComponent(sku.toUpperCase())}?quantity=${safeQty}`;
+  };
+
   const handleSelect = (itemSku: string) => {
     if (itemSku) {
       setIsSearching(true);
-      router.push(`/item/${itemSku}`);
+      router.push(buildItemHref(itemSku));
       setQuery("");
     }
   };
@@ -93,7 +117,7 @@ export default function Home() {
   const handleSearch = () => {
     if (query.trim()) {
       setIsSearching(true);
-      router.push(`/item/${query.trim().toUpperCase()}`);
+      router.push(buildItemHref(query.trim()));
       setQuery("");
     }
   };
@@ -121,48 +145,84 @@ export default function Home() {
         </div>
 
         {/* Search Card */}
-        <div ref={searchCardRef} className="bg-white p-6 md:p-8 rounded-2xl shadow-lg border border-gray-200 max-w-2xl mx-auto mb-10">
-          <div className="flex items-center gap-2 justify-center mb-4">
-            <Search className="w-5 h-5 text-blue-600" />
-            <h2 className="text-base md:text-lg font-semibold text-gray-900">
-              Search for an Item
-            </h2>
-          </div>
-          <div className="flex flex-col sm:flex-row gap-2">
-            <div className="flex items-center gap-2 flex-1 border border-gray-300 rounded-lg px-3 py-1.5 focus-within:border-blue-400 focus-within:ring-2 focus-within:ring-blue-100 transition bg-white">
-              <Search className="w-4 h-4 text-gray-400 flex-shrink-0" />
-              <SearchInput
-                fetchSuggestions={memoizedFetchSuggestions}
-                onSelect={handleSelect}
-                query={query}
-                setQuery={setQuery}
-              />
+        <div ref={searchCardRef} className="max-w-4xl mx-auto mb-10">
+          {multiMode ? (
+            <MultiSkuPanel
+              rows={multiRows}
+              setRows={setMultiRows}
+              onClose={exitMultiMode}
+              variant="card"
+            />
+          ) : (
+            <div className="bg-white p-6 md:p-8 rounded-2xl shadow-lg border border-gray-200">
+              <div className="flex items-center gap-2 justify-center mb-4">
+                <Search className="w-5 h-5 text-blue-600" />
+                <h2 className="text-base md:text-lg font-semibold text-gray-900">
+                  Search for an Item
+                </h2>
+              </div>
+              <div className="flex flex-col sm:flex-row gap-2">
+                <div className="relative flex items-center gap-2 flex-1 border border-gray-300 rounded-lg px-3 py-1.5 focus-within:border-blue-400 focus-within:ring-2 focus-within:ring-blue-100 transition bg-white">
+                  <Search className="w-4 h-4 text-gray-400 flex-shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <SkuAutocomplete
+                      value={query}
+                      onChange={setQuery}
+                      onSelect={handleSelect}
+                      onSubmit={handleSearch}
+                      placeholder="Enter SKU"
+                    />
+                  </div>
+                </div>
+                <input
+                  type="number"
+                  min="1"
+                  value={searchQty}
+                  onChange={(e) => setSearchQty(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") handleSearch();
+                  }}
+                  placeholder="Qty"
+                  aria-label="Quantity"
+                  className="w-20 border border-gray-300 rounded-lg px-2 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-400"
+                />
+                <button
+                  type="button"
+                  onClick={enterMultiMode}
+                  disabled={!query.trim()}
+                  title={query.trim() ? "Add multiple SKUs" : "Enter a SKU first to start a batch"}
+                  aria-label="Add multiple SKUs"
+                  className="inline-flex items-center justify-center px-3 py-2.5 rounded-lg border border-gray-300 text-gray-600 hover:text-blue-600 hover:border-blue-300 transition disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-gray-600 disabled:hover:border-gray-300"
+                >
+                  <Plus className="w-4 h-4" />
+                </button>
+                <button
+                  onClick={handleSearch}
+                  disabled={!query.trim() || isSearching}
+                  className={`px-6 py-2.5 font-semibold rounded-lg transition flex items-center justify-center gap-2 ${
+                    query.trim() && !isSearching
+                      ? "bg-blue-600 text-white hover:bg-blue-700 shadow-md"
+                      : "bg-gray-200 text-gray-400 cursor-not-allowed"
+                  }`}
+                >
+                  {isSearching ? (
+                    <>
+                      <svg className="animate-spin h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                      </svg>
+                      Searching...
+                    </>
+                  ) : (
+                    "Search"
+                  )}
+                </button>
+              </div>
+              <p className="text-xs text-gray-400 mt-3 text-center">
+                Enter item SKU to check production status, or click <Plus className="inline w-3 h-3" /> for multiple SKUs.
+              </p>
             </div>
-            <button
-              onClick={handleSearch}
-              disabled={!query.trim() || isSearching}
-              className={`px-6 py-2.5 font-semibold rounded-lg transition flex items-center justify-center gap-2 ${
-                query.trim() && !isSearching
-                  ? "bg-blue-600 text-white hover:bg-blue-700 shadow-md"
-                  : "bg-gray-200 text-gray-400 cursor-not-allowed"
-              }`}
-            >
-              {isSearching ? (
-                <>
-                  <svg className="animate-spin h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                  </svg>
-                  Searching...
-                </>
-              ) : (
-                "Search"
-              )}
-            </button>
-          </div>
-          <p className="text-xs text-gray-400 mt-3 text-center">
-            Enter item name or SKU to check production status
-          </p>
+          )}
         </div>
 
         {/* Feature Cards */}

@@ -799,7 +799,12 @@ class ProductionService:
                         all_children_resolved = False
                         break
 
-                    recipe.append({"sub_comp_id": sub_id, "qty_per_unit": sub_qty, "sub_sku": sub_sku})
+                    recipe.append({
+                        "sub_comp_id": sub_id,
+                        "qty_per_unit": sub_qty,
+                        "sub_sku": sub_sku,
+                        "unit": next_comp.get("unit", ""),
+                    })
 
                 if not all_children_resolved or not recipe:
                     continue
@@ -830,6 +835,7 @@ class ProductionService:
         # 4. Build demand map for contention detection
         # ------------------------------------------------------------------
         component_demand: Dict[str, List[Dict]] = {}  # comp_id -> [{sku, qty_needed}]
+        comp_id_to_unit: Dict[str, str] = {}
         for meta in ordered_meta:
             for comp in meta["direct_components"]:
                 comp_sku = comp.get("component_sku", "")
@@ -843,6 +849,8 @@ class ProductionService:
                 qty_needed = required_per_unit * meta["desired_qty"]
                 if comp_id not in component_demand:
                     component_demand[comp_id] = []
+                if comp_id not in comp_id_to_unit:
+                    comp_id_to_unit[comp_id] = comp.get("unit", "") or ""
                 component_demand[comp_id].append({
                     "sku": meta["item_sku"],
                     "quantity_needed": qty_needed,
@@ -867,6 +875,7 @@ class ProductionService:
                     "total_demanded": total_demanded,
                     "shortage": total_demanded - total_available,
                     "demanded_by": demands,
+                    "unit": comp_id_to_unit.get(comp_id, ""),
                 })
 
         # ------------------------------------------------------------------
@@ -965,6 +974,7 @@ class ProductionService:
                         "required_quantity": required_total,
                         "available_quantity": available,
                         "shortage_quantity": required_total - available,
+                        "unit": comp.get("unit", "") or "",
                         "reason": "Insufficient shared inventory",
                     }
                     # 2F: Enrich sub-assembly shortages with sub-component details
@@ -979,6 +989,7 @@ class ProductionService:
                                 "item_name": sub_info.get("item_name", r["sub_comp_id"]),
                                 "available_quantity": sub_avail,
                                 "qty_per_unit": r["qty_per_unit"],
+                                "unit": r.get("unit", "") or "",
                             })
                         shortage_entry["reason"] = "Insufficient sub-assembly production capacity"
                         shortage_entry["sub_component_details"] = sub_shortages

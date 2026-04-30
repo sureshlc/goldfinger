@@ -1,13 +1,16 @@
 "use client";
 
-import React, { useState } from "react";
-import { useRouter } from "next/navigation";
+import React, { Suspense, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { AuthService } from "../services/auth";
 import Image from "next/image";
-import { Eye, EyeOff, Mail, Lock, AlertCircle } from "lucide-react";
+import { Eye, EyeOff, Mail, Lock, AlertCircle, Clock } from "lucide-react";
 
-export default function LoginPage() {
+function LoginForm() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const returnTo = searchParams.get("returnTo");
+  const reason = searchParams.get("reason");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -22,8 +25,8 @@ export default function LoginPage() {
 
     try {
       await AuthService.login(email, password);
-      // Login successful, redirect to home
-      router.push("/");
+      const target = returnTo && returnTo.startsWith("/") ? returnTo : "/";
+      router.push(target);
     } catch (err: unknown) {
       const errorMessage = err instanceof Error ? err.message : "Login failed. Please try again.";
       setError(errorMessage);
@@ -54,6 +57,14 @@ export default function LoginPage() {
         <p className="text-center text-gray-600 mb-10 text-base">
           Production Analysis System
         </p>
+
+        {/* Session-expired banner */}
+        {reason === "expired" && !error && (
+          <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-lg text-amber-800 text-sm flex items-start gap-2">
+            <Clock className="w-5 h-5 flex-shrink-0 mt-0.5" />
+            <span>Your session expired. Please log in again to pick up where you left off.</span>
+          </div>
+        )}
 
         {/* Error Message with icon */}
         {error && (
@@ -175,5 +186,17 @@ export default function LoginPage() {
         </p>
       </div>
     </div>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense fallback={
+      <div className="min-h-screen flex items-center justify-center bg-gradient-to-b from-blue-50 to-white">
+        <p className="text-gray-500 text-sm">Loading…</p>
+      </div>
+    }>
+      <LoginForm />
+    </Suspense>
   );
 }

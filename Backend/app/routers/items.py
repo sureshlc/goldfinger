@@ -9,7 +9,7 @@ import logging
 from app.dependencies.auth import get_current_user
 from app.models.user import User
 from app.database.connection import get_db
-from app.database.repositories.item_repo import get_item_by_sku, get_item_by_id
+from app.database.repositories.item_repo import get_item_by_sku, get_item_by_id, search_items
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -39,6 +39,28 @@ class BOMResponse(BaseModel):
     parent_item_sku: str
     components: List[BOMComponent]
     total_components: int
+
+
+class ItemSuggestion(BaseModel):
+    id: str
+    sku: str
+    name: Optional[str] = None
+
+
+@router.get("/search", response_model=List[ItemSuggestion], summary="Search items by SKU/name (typeahead)")
+async def search_items_endpoint(
+    q: str = Query(..., min_length=1, max_length=100),
+    limit: int = Query(10, ge=1, le=50),
+    offset: int = Query(0, ge=0, le=500),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    items = await search_items(db, q)
+    page = items[offset : offset + limit]
+    return [
+        ItemSuggestion(id=str(item.id), sku=item.sku, name=item.name)
+        for item in page
+    ]
 
 
 @router.get("/sku/{item_sku}", response_model=ItemDetailsResponse, summary="Get detailed item information by SKU")
