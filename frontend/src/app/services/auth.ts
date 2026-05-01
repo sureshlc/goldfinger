@@ -51,7 +51,9 @@ export async function fetchWithAuth(url: string, options: RequestInit = {}) {
       throw new Error('Unauthorized');
     }
 
-    if (response.status >= 500) {
+    // 503 is "Service Unavailable" — let the caller surface a specific message
+    // (e.g. "email not configured"). Only generic 500/502/504 get a global toast.
+    if (response.status >= 500 && response.status !== 503) {
       emitToast('error', 'Server error — please try again in a moment.');
     }
 

@@ -6,7 +6,7 @@ import { useRouter } from "next/navigation";
 import { ArrowLeft, AlertTriangle } from "lucide-react";
 import { fetchWithAuth, API_BASE_URL } from "@/app/services/auth";
 import SummaryBanner from "@/app/components/MultiAnalyze/SummaryBanner";
-import AggregatedShortages from "@/app/components/MultiAnalyze/AggregatedShortages";
+import MaterialSummary from "@/app/components/MultiAnalyze/MaterialSummary";
 import PerSkuResults from "@/app/components/MultiAnalyze/PerSkuResults";
 
 interface BatchItemResult {
@@ -35,6 +35,17 @@ interface MaterialContention {
   total_demanded: number;
   shortage: number;
   demanded_by: Array<{ sku: string; quantity_needed: number }>;
+  unit?: string;
+}
+
+interface MaterialSummaryRow {
+  component_sku: string;
+  component_name: string;
+  unit: string;
+  total_demanded: number;
+  total_available: number;
+  shortage: number;
+  demanded_by: Array<{ sku: string; quantity_needed: number }>;
 }
 
 interface BatchSummary {
@@ -48,6 +59,7 @@ interface BatchSummary {
 interface BatchFeasibilityResponse {
   results: BatchItemResult[];
   material_contentions: MaterialContention[];
+  material_summary?: MaterialSummaryRow[];
   summary: BatchSummary;
 }
 
@@ -180,9 +192,11 @@ export default function MultiAnalyzeClient({ itemsParam }: { itemsParam: string 
         {!loading && !error && data && (
           <div ref={resultsRef} className="scroll-mt-20">
             <SummaryBanner summary={data.summary} />
-            <AggregatedShortages
+            <MaterialSummary
               results={data.results}
               contentions={data.material_contentions}
+              materialSummary={data.material_summary}
+              batchItems={items}
             />
             <PerSkuResults results={data.results} />
           </div>

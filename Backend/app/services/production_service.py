@@ -836,6 +836,8 @@ class ProductionService:
         # ------------------------------------------------------------------
         component_demand: Dict[str, List[Dict]] = {}  # comp_id -> [{sku, qty_needed}]
         comp_id_to_unit: Dict[str, str] = {}
+        comp_id_to_sku: Dict[str, str] = {}
+        comp_id_to_name: Dict[str, str] = {}
         for meta in ordered_meta:
             for comp in meta["direct_components"]:
                 comp_sku = comp.get("component_sku", "")
@@ -851,10 +853,92 @@ class ProductionService:
                     component_demand[comp_id] = []
                 if comp_id not in comp_id_to_unit:
                     comp_id_to_unit[comp_id] = comp.get("unit", "") or ""
+                if comp_sku and comp_id not in comp_id_to_sku:
+                    comp_id_to_sku[comp_id] = comp_sku
+                comp_name_from_bom = (
+                    comp.get("component_displayname")
+                    or comp.get("component_name")
+                    or comp.get("displayname")
+                    or ""
+                )
+                if comp_name_from_bom and comp_id not in comp_id_to_name:
+                    comp_id_to_name[comp_id] = comp_name_from_bom
                 component_demand[comp_id].append({
                     "sku": meta["item_sku"],
                     "quantity_needed": qty_needed,
                 })
+
+        # Backfill maps for sub-component leaves so the materials summary has
+        # SKU/name/unit even for items that only appear under sub-assemblies.
+        for sub_id, recipe in sub_assembly_recipes.items():
+            for r in recipe:
+                child_id = r["sub_comp_id"]
+                if child_id not in comp_id_to_unit:
+                    comp_id_to_unit[child_id] = r.get("unit", "") or ""
+                if child_id not in comp_id_to_sku and r.get("sub_sku"):
+                    comp_id_to_sku[child_id] = r["sub_sku"]
+                if child_id not in comp_id_to_name:
+                    sub_info = comp_id_to_info.get(child_id, {})
+                    name = sub_info.get("item_name") or sub_info.get("displayname") or ""
+                    if name:
+                        comp_id_to_name[child_id] = name
+
+        # ------------------------------------------------------------------
+        # 4.5  Build material_summary — leaf-level demand for the whole batch.
+        #      For each direct component:
+        #        - leaf  -> contributes its own demand
+        #        - sub-assembly -> demand expands into recipe (qty_per_unit × parent_required)
+        # ------------------------------------------------------------------
+        leaf_demand: Dict[str, Dict] = {}  # comp_id -> {"total": float, "by_sku": {sku: float}}
+
+        def _add_leaf_demand(comp_id: str, sku: str, qty: float):
+            if qty <= 0:
+                return
+            entry = leaf_demand.setdefault(comp_id, {"total": 0.0, "by_sku": {}})
+            entry["total"] += qty
+            entry["by_sku"][sku] = entry["by_sku"].get(sku, 0.0) + qty
+
+        for meta in ordered_meta:
+            sku_label = meta["item_sku"]
+            desired_qty_meta = meta["desired_qty"]
+            for comp in meta["direct_components"]:
+                comp_sku = comp.get("component_sku", "")
+                comp_id = comp_sku_to_id.get(comp_sku)
+                if not comp_id:
+                    continue
+                if comp_sku == self.water_sku or comp_id == self.water_id:
+                    continue
+                req_per_unit = float(comp.get("quantity_required", 0))
+                req_total = req_per_unit * desired_qty_meta
+                if comp_id in sub_assembly_recipes:
+                    for r in sub_assembly_recipes[comp_id]:
+                        _add_leaf_demand(
+                            r["sub_comp_id"],
+                            sku_label,
+                            req_total * float(r.get("qty_per_unit", 0)),
+                        )
+                else:
+                    _add_leaf_demand(comp_id, sku_label, req_total)
+
+        material_summary: List[Dict] = []
+        for cid, info_d in leaf_demand.items():
+            available = inventory_map.get(cid, 0)
+            demanded = info_d["total"]
+            material_summary.append({
+                "component_sku": comp_id_to_sku.get(cid, cid),
+                "component_name": comp_id_to_name.get(cid, comp_id_to_sku.get(cid, "")),
+                "unit": comp_id_to_unit.get(cid, ""),
+                "total_demanded": demanded,
+                "total_available": available,
+                "shortage": max(0.0, demanded - available),
+                "demanded_by": [
+                    {"sku": s, "quantity_needed": q}
+                    for s, q in info_d["by_sku"].items()
+                ],
+            })
+
+        # Shortages first (descending), then sufficient items by SKU.
+        material_summary.sort(key=lambda m: (-m["shortage"], m["component_sku"]))
 
         # ------------------------------------------------------------------
         # 5. Detect contentions (shared components where demand > supply)
@@ -868,9 +952,19 @@ class ProductionService:
             total_available = sub_assembly_map.get(comp_id, inventory_map.get(comp_id, 0))
             if total_demanded > total_available:
                 info = comp_id_to_info.get(comp_id, {})
+                resolved_sku = (
+                    comp_id_to_sku.get(comp_id)
+                    or info.get("item_sku")
+                    or comp_id
+                )
+                resolved_name = (
+                    comp_id_to_name.get(comp_id)
+                    or info.get("item_name")
+                    or comp_id_to_sku.get(comp_id, comp_id)
+                )
                 material_contentions.append({
-                    "component_sku": info.get("item_sku", comp_id),
-                    "component_name": info.get("item_name", comp_id),
+                    "component_sku": resolved_sku,
+                    "component_name": resolved_name,
                     "total_available": total_available,
                     "total_demanded": total_demanded,
                     "shortage": total_demanded - total_available,
@@ -973,6 +1067,8 @@ class ProductionService:
                         "item_sku": comp_sku,
                         "required_quantity": required_total,
                         "available_quantity": available,
+                        # Pre-deduction batch-wide pool (for cross-SKU aggregation).
+                        "initial_quantity": inventory_map.get(comp_id, 0),
                         "shortage_quantity": required_total - available,
                         "unit": comp.get("unit", "") or "",
                         "reason": "Insufficient shared inventory",
@@ -988,6 +1084,8 @@ class ProductionService:
                                 "item_sku": r.get("sub_sku", r["sub_comp_id"]),
                                 "item_name": sub_info.get("item_name", r["sub_comp_id"]),
                                 "available_quantity": sub_avail,
+                                # Pre-deduction batch-wide pool (for cross-SKU aggregation).
+                                "initial_quantity": inventory_map.get(r["sub_comp_id"], 0),
                                 "qty_per_unit": r["qty_per_unit"],
                                 "unit": r.get("unit", "") or "",
                             })
@@ -1076,6 +1174,7 @@ class ProductionService:
         return {
             "results": results,
             "material_contentions": material_contentions,
+            "material_summary": material_summary,
             "summary": summary,
         }
 

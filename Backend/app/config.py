@@ -48,6 +48,25 @@ class Settings(BaseSettings):
     
     # CORS Settings
     allowed_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
+
+    # ============================================================================
+    # SMTP / EMAIL (AWS SES via SMTP, or any SMTP relay)
+    # ============================================================================
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_from: str = ""
+    smtp_use_tls: bool = True
+
+    @property
+    def email_configured(self) -> bool:
+        return all([
+            self.smtp_host,
+            self.smtp_username,
+            self.smtp_password,
+            self.smtp_from,
+        ])
     
     class Config:
         env_file = ".env"

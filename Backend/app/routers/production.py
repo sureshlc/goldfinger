@@ -1,13 +1,19 @@
 from fastapi import APIRouter, HTTPException, Query, Depends, Request
 from typing import Optional, List
+import asyncio
+import csv
+import io
 import logging
 import time
-from pydantic import BaseModel, ConfigDict, Field
+from datetime import datetime
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 from app.services.production_service import ProductionService
 from app.services.service_registry import get_production_service, get_bom_service
 from app.utils.suiteql_sanitizer import validate_suiteql_identifier
+from app.utils.email_sender import EmailNotConfiguredError, send_email
 from app.dependencies.auth import get_current_user, get_admin_user
 from app.models.user import User
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -58,6 +64,15 @@ class MaterialContention(BaseModel):
     demanded_by: List[dict]  # [{ sku, quantity_needed }]
     unit: Optional[str] = ""
 
+class MaterialSummary(BaseModel):
+    component_sku: str
+    component_name: str
+    unit: Optional[str] = ""
+    total_demanded: float
+    total_available: float
+    shortage: float
+    demanded_by: List[dict]  # [{ sku, quantity_needed }]
+
 class BatchItemResult(BaseModel):
     item_sku: str
     item_name: str
@@ -71,7 +86,19 @@ class BatchItemResult(BaseModel):
 class BatchFeasibilityResponse(BaseModel):
     results: List[BatchItemResult]
     material_contentions: List[MaterialContention]
+    material_summary: List[MaterialSummary] = []
     summary: dict  # { total_skus, fully_producible, partially_producible, blocked, contention_count }
+
+class EmailFeasibilityRequest(BaseModel):
+    items: List[BatchFeasibilityItem] = Field(min_length=1, max_length=50)
+    location_name: Optional[str] = None
+    recipients: List[EmailStr] = Field(min_length=1, max_length=10)
+    subject: Optional[str] = None
+    note: Optional[str] = None
+
+class EmailFeasibilityResponse(BaseModel):
+    sent: bool
+    recipients_count: int
 
 
 @router.get("/feasibility/{item_identifier}", response_model=ProductionAnalysisResponse)
@@ -279,6 +306,133 @@ async def get_batch_feasibility(
     except Exception as e:
         logger.error(f"Error in batch feasibility: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to analyze batch feasibility")
+
+
+def _materials_to_csv(material_summary: List[dict]) -> bytes:
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow([
+        "Component SKU",
+        "Component Name",
+        "Unit",
+        "Total Demanded",
+        "Total Available",
+        "Shortage",
+        "Affected SKUs",
+    ])
+    for m in material_summary:
+        affected = ", ".join(d.get("sku", "") for d in m.get("demanded_by", []))
+        writer.writerow([
+            m.get("component_sku", ""),
+            m.get("component_name", ""),
+            m.get("unit", ""),
+            f"{m.get('total_demanded', 0):.4f}".rstrip("0").rstrip("."),
+            f"{m.get('total_available', 0):.4f}".rstrip("0").rstrip("."),
+            f"{m.get('shortage', 0):.4f}".rstrip("0").rstrip("."),
+            affected,
+        ])
+    return buf.getvalue().encode("utf-8")
+
+
+def _build_email_html(report: dict, batch_items: List[BatchFeasibilityItem], note: Optional[str]) -> str:
+    summary = report.get("summary", {}) or {}
+    materials = report.get("material_summary", []) or []
+    short_rows = [m for m in materials if (m.get("shortage", 0) or 0) > 0]
+    fully = summary.get("fully_producible", 0)
+    partial = summary.get("partially_producible", 0)
+    blocked = summary.get("blocked", 0)
+
+    items_listing = "".join(
+        f"<li><strong>{i.sku.upper()}</strong> &times; {i.desired_quantity}</li>"
+        for i in batch_items
+    )
+
+    short_rows_html = "".join(
+        f"<tr>"
+        f"<td style='padding:6px 8px;border:1px solid #e5e7eb;'>{m.get('component_sku','')}</td>"
+        f"<td style='padding:6px 8px;border:1px solid #e5e7eb;'>{m.get('component_name','')}</td>"
+        f"<td style='padding:6px 8px;border:1px solid #e5e7eb;text-align:right;'>{m.get('total_demanded',0):g} {m.get('unit','')}</td>"
+        f"<td style='padding:6px 8px;border:1px solid #e5e7eb;text-align:right;'>{m.get('total_available',0):g} {m.get('unit','')}</td>"
+        f"<td style='padding:6px 8px;border:1px solid #e5e7eb;text-align:right;color:#b91c1c;font-weight:600;'>{m.get('shortage',0):g} {m.get('unit','')}</td>"
+        f"</tr>"
+        for m in short_rows
+    ) or "<tr><td colspan='5' style='padding:8px;color:#16a34a;'>No shortages — all materials available.</td></tr>"
+
+    note_block = f"<p style='margin:0 0 12px 0;color:#374151;'><em>{note}</em></p>" if note else ""
+
+    return f"""
+    <html><body style='font-family:-apple-system,Segoe UI,Roboto,sans-serif;color:#111827;'>
+      <h2 style='margin:0 0 8px 0;'>Production Feasibility Report</h2>
+      <p style='margin:0 0 12px 0;color:#6b7280;font-size:13px;'>Generated {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}</p>
+      {note_block}
+      <h3 style='margin:16px 0 4px 0;'>Batch</h3>
+      <ul style='margin:0 0 12px 16px;'>{items_listing}</ul>
+      <p style='margin:0 0 12px 0;'>
+        <strong>{fully}</strong> fully producible &middot;
+        <strong>{partial}</strong> partial &middot;
+        <strong>{blocked}</strong> blocked
+      </p>
+      <h3 style='margin:16px 0 4px 0;'>Material shortages</h3>
+      <table style='border-collapse:collapse;font-size:13px;'>
+        <thead>
+          <tr style='background:#f9fafb;'>
+            <th style='padding:6px 8px;border:1px solid #e5e7eb;text-align:left;'>SKU</th>
+            <th style='padding:6px 8px;border:1px solid #e5e7eb;text-align:left;'>Name</th>
+            <th style='padding:6px 8px;border:1px solid #e5e7eb;text-align:right;'>Demanded</th>
+            <th style='padding:6px 8px;border:1px solid #e5e7eb;text-align:right;'>Available</th>
+            <th style='padding:6px 8px;border:1px solid #e5e7eb;text-align:right;'>Short</th>
+          </tr>
+        </thead>
+        <tbody>{short_rows_html}</tbody>
+      </table>
+      <p style='margin:12px 0 0 0;color:#6b7280;font-size:12px;'>
+        Full materials list (including sufficient items) is attached as CSV.
+      </p>
+    </body></html>
+    """
+
+
+@router.post("/batch-feasibility/email", response_model=EmailFeasibilityResponse)
+async def email_batch_feasibility(
+    body: EmailFeasibilityRequest,
+    current_user: User = Depends(get_current_user),
+    production_service: ProductionService = Depends(get_production_service),
+):
+    """Run batch feasibility and email the report (CSV attached) to the given recipients."""
+    if not settings.email_configured:
+        raise HTTPException(
+            status_code=503,
+            detail="Email is not configured. Contact an admin to set up SMTP.",
+        )
+
+    try:
+        report = await production_service.get_batch_production_analysis(
+            items=[(item.sku, item.desired_quantity) for item in body.items],
+            location_name=body.location_name,
+        )
+
+        csv_bytes = _materials_to_csv(report.get("material_summary", []) or [])
+        html = _build_email_html(report, body.items, body.note)
+        subject = body.subject or f"Production Feasibility Report — {len(body.items)} SKU(s)"
+        filename = f"materials-{datetime.utcnow().strftime('%Y-%m-%d')}.csv"
+
+        await asyncio.to_thread(
+            send_email,
+            settings,
+            list(body.recipients),
+            subject,
+            html,
+            None,
+            [(filename, csv_bytes, "text/csv")],
+        )
+        return EmailFeasibilityResponse(sent=True, recipients_count=len(body.recipients))
+    except EmailNotConfiguredError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error sending batch feasibility email: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to send report email")
 
 
 # ============================================================================
