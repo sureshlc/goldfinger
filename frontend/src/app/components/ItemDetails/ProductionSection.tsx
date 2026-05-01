@@ -123,12 +123,21 @@ const ProductionSection: React.FC<ProductionSectionProps> = ({
     return cell;
   };
 
+  // Backend tags water (and any other infinite-supply item) with display_quantity="Unlimited"
+  // and available_quantity=999999. Treat both as the universal "Infinite" indicator.
+  const isInfiniteAvail = (display?: string, qty?: number): boolean => {
+    if (display && /^(unlimited|infinite)$/i.test(display.trim())) return true;
+    if (qty !== undefined && qty >= 999999) return true;
+    return false;
+  };
+
   const buildTimestampedFilename = (): string => {
     const now = new Date();
     const pad = (n: number) => String(n).padStart(2, "0");
-    return `materials-${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(
-      now.getDate()
-    )}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}.csv`;
+    const stamp =
+      `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}` +
+      `_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+    return `materials-${stamp}.csv`;
   };
 
   const handleExportCsv = () => {
@@ -139,22 +148,40 @@ const ProductionSection: React.FC<ProductionSectionProps> = ({
       "Required",
       "Available",
       "Shortage",
-      "Status",
     ].join(",");
-    const lines = mergedComponents.map((c) => {
+    // Skip deeply-nested rows (level >= 2) so the CSV stays focused on what
+    // the production team directly verifies: top-level components and their
+    // immediate sub-components. Deeper leaves (level 2+) are an implementation
+    // detail of the sub-recipe and tend to confuse readers.
+    const exportable = mergedComponents.filter((c) => (c.level ?? 0) < 2);
+    const lines = exportable.map((c) => {
       const required = c.required_for_desired_qty ?? c.quantity_required * currentQuantity;
       const shortageQty = c.shortage_info?.shortage_quantity ?? 0;
+      const availableDisplay = isInfiniteAvail(c.display_quantity, c.available_quantity)
+        ? "Infinite"
+        : formatAvailable(c.available_quantity);
       return [
         csvEscape(c.item_sku || ""),
         csvEscape(c.item_name || ""),
         csvEscape(c.unit || ""),
         csvEscape(formatQuantity(required)),
-        csvEscape(formatAvailable(c.available_quantity)),
+        csvEscape(availableDisplay),
         csvEscape(formatQuantity(shortageQty)),
-        csvEscape(c.sufficient ? "OK" : c.has_shortage ? "Short" : "Partial"),
       ].join(",");
     });
-    const csv = [header, ...lines].join("\n");
+
+    // Preamble: identify the report up top, in single-cell rows so they sit
+    // clearly above the table rather than aligning with its columns.
+    const itemSku = productionData.item_sku || sku || "";
+    const itemName = productionData.item_name || "";
+    const preamble = [
+      csvEscape(`Item SKU: ${itemSku}`),
+      itemName ? csvEscape(`Item Name: ${itemName}`) : "",
+      csvEscape(`Desired Quantity: ${currentQuantity}`),
+      "",
+    ].filter((row, idx, arr) => row !== "" || idx === arr.length - 1);
+
+    const csv = [...preamble, header, ...lines].join("\n");
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -486,7 +513,11 @@ const ProductionSection: React.FC<ProductionSectionProps> = ({
                       </div>
                       <div>
                         <p className="text-gray-500">Available</p>
-                        <p className="font-semibold">{comp.display_quantity || formatAvailable(comp.available_quantity)} {comp.unit}</p>
+                        <p className="font-semibold">
+                          {isInfiniteAvail(comp.display_quantity, comp.available_quantity)
+                            ? "Infinite"
+                            : `${comp.display_quantity || formatAvailable(comp.available_quantity)} ${comp.unit}`}
+                        </p>
                       </div>
                       <div>
                         <p className="text-gray-500">Max Units</p>
