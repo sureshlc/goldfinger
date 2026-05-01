@@ -202,14 +202,22 @@ const buildCsv = (rows: MaterialSummaryRow[]): string => {
   return [header, ...lines].join("\n");
 };
 
+const buildCsvFilename = (): string => {
+  const now = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const stamp =
+    `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}` +
+    `_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+  return `materials-${stamp}.csv`;
+};
+
 const downloadCsv = (rows: MaterialSummaryRow[]) => {
   const csv = buildCsv(rows);
   const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
-  const date = new Date().toISOString().slice(0, 10);
   a.href = url;
-  a.download = `materials-${date}.csv`;
+  a.download = buildCsvFilename();
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
@@ -445,7 +453,7 @@ const MaterialSummary: React.FC<Props> = ({
                       isShort ? "text-red-600 font-semibold" : "text-gray-400"
                     }`}
                   >
-                    {isShort ? `${formatNum(r.shortage)} ${r.unit}` : "—"}
+                    {formatNum(r.shortage)} {r.unit}
                   </td>
                   <td className="px-3 py-3 text-center align-top">
                     {isShort ? (

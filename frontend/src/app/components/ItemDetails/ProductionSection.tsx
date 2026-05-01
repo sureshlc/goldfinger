@@ -1,7 +1,10 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { useRouter, usePathname } from "next/navigation";
+import { Download, Mail, X } from "lucide-react";
+import { fetchWithAuth, API_BASE_URL } from "@/app/services/auth";
+import { emitToast } from "@/app/components/toast/ToastContext";
 
 export interface BOMComponent {
   item_id: string;
@@ -70,6 +73,11 @@ const ProductionSection: React.FC<ProductionSectionProps> = ({
   const [isUpdating, setIsUpdating] = useState(false);
   const [showAllComponents, setShowAllComponents] = useState(isExpanded);
   const [showAllShortages, setShowAllShortages] = useState(isExpanded);
+  const [emailOpen, setEmailOpen] = useState(false);
+  const [recipients, setRecipients] = useState("");
+  const [note, setNote] = useState("");
+  const [sending, setSending] = useState(false);
+  const recipientsRef = useRef<HTMLInputElement>(null);
 
   // Helper function to format numbers intelligently
   const formatQuantity = (value: number): string => {
@@ -106,6 +114,98 @@ const ProductionSection: React.FC<ProductionSectionProps> = ({
       setIsUpdating(true);
       const urlSku = pathname?.split("/item/")[1]?.split("?")[0] || sku;
       router.push(`/item/${urlSku}?quantity=${newQty}`);
+    }
+  };
+
+  const csvEscape = (cell: string): string => {
+    if (cell == null) return "";
+    if (/[",\n]/.test(cell)) return `"${cell.replace(/"/g, '""')}"`;
+    return cell;
+  };
+
+  const buildTimestampedFilename = (): string => {
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return `materials-${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(
+      now.getDate()
+    )}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}.csv`;
+  };
+
+  const handleExportCsv = () => {
+    const header = [
+      "Component SKU",
+      "Component Name",
+      "Unit",
+      "Required",
+      "Available",
+      "Shortage",
+      "Status",
+    ].join(",");
+    const lines = mergedComponents.map((c) => {
+      const required = c.required_for_desired_qty ?? c.quantity_required * currentQuantity;
+      const shortageQty = c.shortage_info?.shortage_quantity ?? 0;
+      return [
+        csvEscape(c.item_sku || ""),
+        csvEscape(c.item_name || ""),
+        csvEscape(c.unit || ""),
+        csvEscape(formatQuantity(required)),
+        csvEscape(formatAvailable(c.available_quantity)),
+        csvEscape(formatQuantity(shortageQty)),
+        csvEscape(c.sufficient ? "OK" : c.has_shortage ? "Short" : "Partial"),
+      ].join(",");
+    });
+    const csv = [header, ...lines].join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = buildTimestampedFilename();
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleEmailSend = async () => {
+    const list = recipients
+      .split(/[,\s;]+/)
+      .map((r) => r.trim())
+      .filter(Boolean);
+    if (list.length === 0) {
+      emitToast("error", "Please enter at least one recipient.");
+      return;
+    }
+    setSending(true);
+    try {
+      const itemSku = (productionData.item_sku || sku || "").toUpperCase();
+      const res = await fetchWithAuth(
+        `${API_BASE_URL}/production/batch-feasibility/email`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            items: [{ sku: itemSku, desired_quantity: currentQuantity }],
+            recipients: list,
+            note: note.trim() || null,
+          }),
+        }
+      );
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        emitToast("error", body.detail || `Failed to send (${res.status})`);
+        return;
+      }
+      const data = await res.json();
+      emitToast(
+        "success",
+        `Report sent to ${data.recipients_count} recipient${data.recipients_count === 1 ? "" : "s"}.`
+      );
+      setEmailOpen(false);
+      setRecipients("");
+      setNote("");
+    } catch {
+      emitToast("error", "Failed to send report email.");
+    } finally {
+      setSending(false);
     }
   };
 
@@ -248,12 +348,91 @@ const ProductionSection: React.FC<ProductionSectionProps> = ({
 
       {/* Component Status Section */}
       <div className="border-t border-gray-200">
-        <div className="px-6 py-4 bg-gray-50 flex justify-between items-center">
-          <h2 className="text-sm font-semibold text-gray-700 uppercase tracking-wide">
-            Component Status ({mergedComponents.length} components)
-          </h2>
-          <span className="text-xs text-gray-500">BOM hierarchy with availability</span>
+        <div className="px-6 py-4 bg-gray-50 flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="text-sm font-semibold text-gray-700 uppercase tracking-wide">
+              Component Status ({mergedComponents.length} components)
+            </h2>
+            <p className="text-xs text-gray-500 mt-0.5">BOM hierarchy with availability</p>
+          </div>
+          <div className="flex items-center gap-2 ml-auto">
+            <button
+              type="button"
+              onClick={handleExportCsv}
+              className="inline-flex items-center gap-1.5 text-xs font-medium text-gray-700 bg-white border border-gray-200 hover:border-gray-300 hover:bg-gray-50 rounded-md px-2.5 py-1.5 transition"
+            >
+              <Download className="w-3.5 h-3.5" /> Export CSV
+            </button>
+            <button
+              type="button"
+              onClick={() => setEmailOpen((v) => !v)}
+              className={`inline-flex items-center gap-1.5 text-xs font-medium rounded-md px-2.5 py-1.5 transition border ${
+                emailOpen
+                  ? "bg-blue-50 border-blue-200 text-blue-700"
+                  : "bg-white border-gray-200 text-gray-700 hover:border-gray-300 hover:bg-gray-50"
+              }`}
+            >
+              <Mail className="w-3.5 h-3.5" /> {emailOpen ? "Cancel" : "Email"}
+            </button>
+          </div>
         </div>
+
+        {emailOpen && (
+          <div className="bg-blue-50/40 border-b border-blue-100 px-6 py-3 flex flex-col gap-2">
+            <div>
+              <label className="text-xs font-medium text-gray-700 block mb-1">Recipients</label>
+              <div className="relative">
+                <input
+                  ref={recipientsRef}
+                  type="text"
+                  value={recipients}
+                  onChange={(e) => setRecipients(e.target.value)}
+                  placeholder="email1@example.com, email2@example.com"
+                  className="w-full border border-gray-300 rounded-md px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-400 pr-8"
+                />
+                {recipients && (
+                  <button
+                    type="button"
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => {
+                      setRecipients("");
+                      recipientsRef.current?.focus();
+                    }}
+                    className="absolute right-1.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 transition p-0.5"
+                    aria-label="Clear recipients"
+                    title="Clear recipients"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+            </div>
+            <div>
+              <label className="text-xs font-medium text-gray-700 block mb-1">Optional note</label>
+              <textarea
+                value={note}
+                onChange={(e) => setNote(e.target.value)}
+                rows={2}
+                placeholder="Anything the production team should know about this item?"
+                className="w-full border border-gray-300 rounded-md px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-400 resize-y"
+              />
+            </div>
+            <div className="flex justify-end">
+              <button
+                type="button"
+                onClick={handleEmailSend}
+                disabled={sending || !recipients.trim()}
+                className={`px-4 py-1.5 rounded-md text-sm font-semibold transition ${
+                  sending || !recipients.trim()
+                    ? "bg-gray-200 text-gray-400 cursor-not-allowed"
+                    : "bg-blue-600 text-white hover:bg-blue-700 shadow-sm"
+                }`}
+              >
+                {sending ? "Sending…" : "Send report"}
+              </button>
+            </div>
+          </div>
+        )}
 
         <div className="p-6 relative">
           {/* Component list */}
