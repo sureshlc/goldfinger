@@ -44,21 +44,37 @@ async def _get_user_cached(email: str):
 
 
 async def _authenticate_api_key(api_key: str) -> Optional[User]:
-    """Authenticate via X-API-Key header. Returns SERVICE_USER if valid."""
+    """Authenticate via X-API-Key header.
+
+    Attributes the request to the admin who created the key (so audit logs show a
+    real user), but keeps role='service' so an API key cannot reach admin-only
+    endpoints. Falls back to the generic SERVICE_USER if the creator is missing.
+    """
     key_hash = hashlib.sha256(api_key.encode()).hexdigest()
 
     factory = get_session_factory()
     async with factory() as session:
         from app.database.repositories.api_key_repo import get_api_key_by_hash, update_last_used
+        from app.database.repositories.user_repo import get_user_by_id
 
         db_key = await get_api_key_by_hash(session, key_hash)
         if db_key is None or not db_key.is_active:
             return None
 
         await update_last_used(session, db_key.id)
+        creator = await get_user_by_id(session, db_key.created_by)
         await session.commit()
 
-    return SERVICE_USER
+    if creator is None:
+        return SERVICE_USER
+
+    return User(
+        id=creator.id,
+        username=creator.username,
+        email=creator.email,
+        role="service",
+        disabled=False,
+    )
 
 
 async def get_current_user(
@@ -94,6 +110,7 @@ async def get_current_user(
 
         current_user = User(**user.dict())
         request.state.user = current_user
+        request.state.auth_method = "jwt"
         return current_user
 
     # Path B: X-API-Key header
@@ -102,6 +119,7 @@ async def get_current_user(
         user = await _authenticate_api_key(api_key)
         if user is not None:
             request.state.user = user
+            request.state.auth_method = "api_key"
             return user
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

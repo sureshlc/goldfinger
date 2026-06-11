@@ -28,6 +28,7 @@ interface AuditLog {
   username: string | null;
   action: string;
   details: string | null;
+  source: string | null;
 }
 
 interface AdminItem {
@@ -194,6 +195,7 @@ function AuditLogsTab() {
                 <tr>
                   <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Timestamp</th>
                   <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">User</th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Source</th>
                   <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Action</th>
                   <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Details</th>
                 </tr>
@@ -208,6 +210,15 @@ function AuditLogsTab() {
                       </td>
                       <td className="px-4 py-2.5 text-gray-900 font-medium text-xs whitespace-nowrap">
                         {log.username || (log.user_id ? `User #${log.user_id}` : "-")}
+                      </td>
+                      <td className="px-4 py-2.5">
+                        <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold ${
+                          log.source === "REST"
+                            ? "bg-amber-100 text-amber-700"
+                            : "bg-gray-100 text-gray-600"
+                        }`}>
+                          {log.source || "UI"}
+                        </span>
                       </td>
                       <td className="px-4 py-2.5">
                         <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold ${info.color}`}>

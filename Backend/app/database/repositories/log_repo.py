@@ -59,6 +59,7 @@ async def insert_request_log(db: AsyncSession, log_data: dict) -> RequestLogDB:
         error_message=log_data.get("error_message") or None,
         cache_hit=log_data.get("cache_hit") or None,
         location=log_data.get("location") or None,
+        source=log_data.get("source") or None,
     )
     db.add(log)
     await db.flush()

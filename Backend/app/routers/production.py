@@ -298,6 +298,19 @@ async def get_batch_feasibility(
             location_name=body.location_name,
         )
 
+        # Log one record per SKU (shared request_id) so multi-SKU runs are auditable
+        request.state.production_data = [
+            {
+                "item_sku": r.get("item_sku", ""),
+                "desired_quantity": str(r.get("desired_quantity", "")),
+                "max_producible": str(r.get("max_quantity_producible", "")),
+                "can_produce": str(r.get("can_produce", "")),
+                "limiting_component": r.get("limiting_component", "") or "",
+                "shortages_count": str(len(r.get("shortages", []) or [])),
+            }
+            for r in result.get("results", [])
+        ]
+
         elapsed = time.time() - request_start
         logger.info(f"[ROUTER] Batch feasibility took {elapsed:.3f}s")
 

@@ -471,6 +471,7 @@ async def get_audit_logs(
             UserDB.username.label("username"),
             AuditEventDB.action.label("action"),
             AuditEventDB.details.label("details"),
+            literal("UI").label("source"),
         )
         .outerjoin(UserDB, AuditEventDB.user_id == UserDB.id)
     )
@@ -487,6 +488,7 @@ async def get_audit_logs(
                 ', Producible: ', func.coalesce(RequestLogDB.can_produce, '?'),
                 ', Max: ', func.coalesce(RequestLogDB.max_producible, '?'),
             ).label("details"),
+            func.coalesce(RequestLogDB.source, 'UI').label("source"),
         )
         .outerjoin(UserDB, RequestLogDB.user_id == UserDB.id)
         .where(RequestLogDB.item_sku.isnot(None))
@@ -515,6 +517,7 @@ async def get_audit_logs(
                 "username": row.username,
                 "action": row.action,
                 "details": row.details,
+                "source": row.source,
             }
             for row in rows
         ],

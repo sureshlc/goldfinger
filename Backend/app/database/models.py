@@ -75,6 +75,7 @@ class RequestLogDB(Base):
     error_message = Column(Text, nullable=True)
     cache_hit = Column(String(50), nullable=True)
     location = Column(String(255), nullable=True)
+    source = Column(String(20), nullable=True)  # 'UI' (web/JWT) or 'REST' (API key)
 
     user = relationship("UserDB", back_populates="request_logs")
 

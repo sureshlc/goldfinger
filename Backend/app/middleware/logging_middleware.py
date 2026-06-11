@@ -116,8 +116,9 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             # Calculate response time
             response_time_ms = round((time.time() - start_time) * 1000, 2)
             
-            # Extract request data
-            log_data = await self._extract_request_data(
+            # Extract request data — a list of one row per logged record
+            # (multi-SKU batch requests produce one row per SKU)
+            log_rows = await self._extract_request_data(
                 request=request,
                 request_id=request_id,
                 session_id=session_id,
@@ -128,13 +129,14 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
                 error_message=error_message,
                 response=response
             )
-            
+
             # Push to async queue (non-blocking)
-            try:
-                logger.debug(f"About to enqueue log_data: {log_data}")
-                await log_request_async(log_data)
-            except Exception as e:
-                logger.error(f"Failed to enqueue log for request {request_id}: {e}")
+            for log_data in log_rows:
+                try:
+                    logger.debug(f"About to enqueue log_data: {log_data}")
+                    await log_request_async(log_data)
+                except Exception as e:
+                    logger.error(f"Failed to enqueue log for request {request_id}: {e}")
         
         return response
     
@@ -169,26 +171,16 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         error_type: Optional[str],
         error_message: Optional[str],
         response: Optional[Response]
-    ) -> dict:
+    ) -> list:
         """
-        Extract relevant data from request for logging
-        
-        Args:
-            request: FastAPI request object
-            request_id: Generated request ID
-            session_id: Session ID if available
-            user_id: User ID if available
-            response_time_ms: Response time in milliseconds
-            status_code: HTTP status code
-            error_type: Error type if any
-            error_message: Error message if any
-            response: Response object
-            
-        Returns:
-            Dict with request data for CSV logging
+        Build the request log row(s) for a request.
+
+        Returns a list of dicts — one row per logged record. A single-SKU request
+        produces one row; a multi-SKU batch (production_data is a list) produces one
+        row per SKU, all sharing the same request_id.
         """
-        # Base data
-        log_data = {
+        # Base data shared by every row for this request
+        base = {
             "timestamp": datetime.utcnow().isoformat() + "Z",
             "request_id": request_id,
             "session_id": session_id or "",
@@ -197,71 +189,60 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             "status_code": status_code,
             "error_type": error_type or "",
             "error_message": error_message or "",
-            "location": ""  # Not capturing location/IP data
+            "location": "",  # Not capturing location/IP data
+            "source": self._get_source(request),
         }
-        
-        # Extract business logic data based on endpoint
-        if "/api/v1/production/" in request.url.path:
-            await self._extract_production_check_data(request, response, log_data)
-        else:
-            # For non-production endpoints, set empty values
-            log_data["item_sku"] = ""
-            log_data["desired_quantity"] = ""
-            log_data["max_producible"] = ""
-            log_data["can_produce"] = ""
-            log_data["limiting_component"] = ""
-            log_data["shortages_count"] = ""
-        
+
         # Check if response was from cache
         if response and hasattr(response, "headers"):
-            log_data["cache_hit"] = response.headers.get("X-Cache-Hit", "false")
+            base["cache_hit"] = response.headers.get("X-Cache-Hit", "false")
         else:
-            log_data["cache_hit"] = ""
-        
-        return log_data
-    
-    async def _extract_production_check_data(
-        self, 
-        request: Request, 
-        response: Optional[Response], 
-        log_data: dict
-    ) -> None:
-        """
-        Extract production-specific data from request state
-        
-        Args:
-            request: FastAPI request object
-            response: Response object (unused but kept for consistency)
-            log_data: Dict to populate with production data
-        """
-        try:
-            if hasattr(request.state, "production_data"):
-                prod_data = request.state.production_data
-                log_data["item_sku"] = prod_data.get("item_sku", "")
-                log_data["desired_quantity"] = prod_data.get("desired_quantity", "")
-                log_data["max_producible"] = prod_data.get("max_producible", "")
-                log_data["can_produce"] = prod_data.get("can_produce", "")
-                log_data["limiting_component"] = prod_data.get("limiting_component", "")
-                log_data["shortages_count"] = prod_data.get("shortages_count", "")
-                logger.debug(f"✅ Extracted production data: {prod_data}")
+            base["cache_hit"] = ""
+
+        # Production endpoints carry SKU-level data; everything else logs one bare row.
+        if "/api/v1/production/" in request.url.path:
+            prod = getattr(request.state, "production_data", None)
+            if isinstance(prod, list):
+                rows = [{**base, **self._prod_fields(entry)} for entry in prod]
+                if rows:
+                    logger.debug(f"✅ Extracted {len(rows)} multi-SKU production rows")
+                    return rows
+            elif isinstance(prod, dict):
+                logger.debug(f"✅ Extracted production data: {prod}")
+                return [{**base, **self._prod_fields(prod)}]
             else:
-                # Set empty values if no production data
-                log_data["item_sku"] = ""
-                log_data["desired_quantity"] = ""
-                log_data["max_producible"] = ""
-                log_data["can_produce"] = ""
-                log_data["limiting_component"] = ""
-                log_data["shortages_count"] = ""
                 logger.debug("⚠️ No production_data found in request.state")
-        except Exception as e:
-            logger.error(f"Error extracting production data: {e}")
-            # Set empty values on error
-            log_data["item_sku"] = ""
-            log_data["desired_quantity"] = ""
-            log_data["max_producible"] = ""
-            log_data["can_produce"] = ""
-            log_data["limiting_component"] = ""
-            log_data["shortages_count"] = ""
+
+        return [{**base, **self._empty_prod()}]
+
+    @staticmethod
+    def _get_source(request: Request) -> str:
+        """Map the auth method to a source tag: 'REST' for API-key/MES, else 'UI'."""
+        auth_method = getattr(request.state, "auth_method", None)
+        return "REST" if auth_method == "api_key" else "UI"
+
+    @staticmethod
+    def _prod_fields(data: dict) -> dict:
+        """Normalize one SKU's production fields for a log row."""
+        return {
+            "item_sku": data.get("item_sku") or "",
+            "desired_quantity": data.get("desired_quantity") or "",
+            "max_producible": data.get("max_producible") or "",
+            "can_produce": data.get("can_produce") or "",
+            "limiting_component": data.get("limiting_component") or "",
+            "shortages_count": data.get("shortages_count") or "",
+        }
+
+    @staticmethod
+    def _empty_prod() -> dict:
+        return {
+            "item_sku": "",
+            "desired_quantity": "",
+            "max_producible": "",
+            "can_produce": "",
+            "limiting_component": "",
+            "shortages_count": "",
+        }
     
     def _get_error_type(self, status_code: int) -> str:
         """

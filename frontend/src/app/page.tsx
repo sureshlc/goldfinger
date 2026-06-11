@@ -288,8 +288,8 @@ export default function Home() {
             ) : (
               <>
                 {/* Desktop table */}
-                <div className="hidden sm:block">
-                  <table className="w-full text-sm">
+                <div className="hidden md:block overflow-x-auto">
+                  <table className="w-full text-sm min-w-[640px]">
                     <thead className="bg-gray-50 border-b border-gray-100">
                       <tr>
                         <th className="px-5 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">SKU</th>
@@ -333,10 +333,10 @@ export default function Home() {
                               className="w-16 border border-gray-200 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                             />
                           </td>
-                          <td className="px-5 py-3.5 text-right">
+                          <td className="px-5 py-3.5 text-right whitespace-nowrap">
                             <button
                               onClick={() => handleAnalyzeItem(item.item_sku)}
-                              className="inline-flex items-center gap-1 bg-blue-600 text-white px-3.5 py-1.5 rounded-lg text-sm font-medium hover:bg-blue-700 transition shadow-sm"
+                              className="inline-flex items-center gap-1 whitespace-nowrap bg-blue-600 text-white px-3.5 py-1.5 rounded-lg text-sm font-medium hover:bg-blue-700 transition shadow-sm"
                               type="button"
                             >
                               Analyze
@@ -350,7 +350,7 @@ export default function Home() {
                 </div>
 
                 {/* Mobile cards */}
-                <div className="sm:hidden divide-y divide-gray-100">
+                <div className="md:hidden divide-y divide-gray-100">
                   {topItems.map((item) => (
                     <div key={item.item_sku} className="p-4">
                       <div className="flex items-center justify-between mb-2">
