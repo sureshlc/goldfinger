@@ -87,8 +87,12 @@ ssh -i your-key.pem ubuntu@<ec2-public-ip>
 # Update system
 sudo apt update && sudo apt upgrade -y
 
-# Python 3.9+
-sudo apt install -y python3.9 python3.9-venv python3-pip
+# Python 3.12 (via deadsnakes PPA; Ubuntu 22.04 ships only 3.10).
+# 3.12 is the validated version; 3.13 also works. Do NOT use 3.9 — it is
+# end-of-life (Oct 2025) and blocks several dependency security patches.
+sudo add-apt-repository -y ppa:deadsnakes/ppa
+sudo apt update
+sudo apt install -y python3.12 python3.12-venv python3-pip
 
 # Node.js 18 (via NodeSource)
 curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
@@ -115,7 +119,7 @@ cd goldfinger
 git clone <your-repo-url> .
 
 cd Backend
-python3 -m venv .venv
+python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
@@ -329,6 +333,27 @@ sudo systemctl restart goldfinger-api   # Backend
 pm2 restart goldfinger-web              # Frontend
 sudo systemctl restart nginx            # Nginx
 ```
+
+### One-time: upgrade Python on an existing instance (3.9 → 3.12)
+
+If the instance was first provisioned with Python 3.9, the venv must be
+**rebuilt** (a plain `pip install` will not change the interpreter):
+
+```bash
+sudo add-apt-repository -y ppa:deadsnakes/ppa && sudo apt update
+sudo apt install -y python3.12 python3.12-venv
+
+cd /opt/goldfinger/Backend
+rm -rf .venv
+python3.12 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt        # env markers now pull the patched releases
+python -m pip install pip-audit && pip-audit   # confirm: only starlette remains (fastapi-gated)
+sudo systemctl restart goldfinger-api
+```
+
+The systemd unit references `.venv/bin/uvicorn`, so no service-file change is
+needed — the rebuilt venv keeps the same path.
 
 ### Deploy updates
 
