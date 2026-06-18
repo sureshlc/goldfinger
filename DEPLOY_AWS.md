@@ -348,7 +348,7 @@ rm -rf .venv
 python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt        # env markers now pull the patched releases
-python -m pip install pip-audit && pip-audit   # confirm: only starlette remains (fastapi-gated)
+python -m pip install pip-audit && pip-audit   # confirm: "No known vulnerabilities found"
 sudo systemctl restart goldfinger-api
 ```
 
