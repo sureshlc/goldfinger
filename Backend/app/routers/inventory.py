@@ -18,6 +18,8 @@ class InventoryLevel(BaseModel):
     item_name: str
     item_sku: str
     available_quantity: float
+    on_hand: Optional[float] = None
+    committed: Optional[float] = None
     inventory_status: Optional[str] = None
     location_name: Optional[str] = None
 
@@ -70,6 +72,8 @@ async def get_item_inventory(
                 item_name=item_name,
                 item_sku=item_sku,
                 available_quantity=0.0,
+                on_hand=0.0,
+                committed=0.0,
                 inventory_status="No inventory",
                 location_name=location_name
             )
@@ -81,6 +85,8 @@ async def get_item_inventory(
             item_name=item_name,
             item_sku=item_sku,
             available_quantity=float(item.get("available_quantity", 0)),
+            on_hand=float(item.get("on_hand", 0)),
+            committed=float(item.get("committed", 0)),
             inventory_status=item.get("inventory_status"),
             location_name=item.get("location_name")
         )

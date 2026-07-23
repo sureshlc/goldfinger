@@ -28,11 +28,12 @@ class InventoryService:
 
         sql = f"""
         WITH CTE AS (
-        SELECT 
+        SELECT
             ib.item as item_id,
             i.itemid as item_sku,
             i.displayname as item_name,
             sum(ib.quantityavailable) as quantity_available,
+            sum(ib.quantityonhand) as quantity_on_hand,
             ib.committedqtyperlocation as committed_quantity,
             BUILTIN.DF(inventorystatus) as inventory_status,
             BUILTIN.DF(ib.location) as location_name
@@ -44,14 +45,16 @@ class InventoryService:
         GROUP BY ib.item, i.itemid, i.displayname, BUILTIN.DF(inventorystatus), BUILTIN.DF(ib.location), ib.committedqtyperlocation
         ORDER BY i.itemid ASC)
 
-        SELECT 
-            item_id, 
-            item_sku, 
-            item_name, 
-            CASE 
-                WHEN sum(quantity_available - committed_quantity) < 0 THEN 0
-                ELSE sum(quantity_available - committed_quantity)
-            END AS available_quantity, 
+        SELECT
+            item_id,
+            item_sku,
+            item_name,
+            CASE
+                WHEN sum(quantity_on_hand - committed_quantity) < 0 THEN 0
+                ELSE sum(quantity_on_hand - committed_quantity)
+            END AS available_quantity,
+            sum(quantity_on_hand) AS on_hand,
+            sum(committed_quantity) AS committed,
             inventory_status
         FROM CTE
         GROUP BY item_id, item_sku, item_name, inventory_status
