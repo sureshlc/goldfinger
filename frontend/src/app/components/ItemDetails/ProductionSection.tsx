@@ -386,17 +386,17 @@ const ProductionSection: React.FC<ProductionSectionProps> = ({
             <button
               type="button"
               onClick={handleExportCsv}
-              className="inline-flex items-center gap-1.5 text-xs font-medium text-gray-700 bg-white border border-gray-200 hover:border-gray-300 hover:bg-gray-50 rounded-md px-2.5 py-1.5 transition"
+              className="inline-flex items-center gap-1.5 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-md px-3 py-1.5 shadow-sm transition"
             >
               <Download className="w-3.5 h-3.5" /> Export CSV
             </button>
             <button
               type="button"
               onClick={() => setEmailOpen((v) => !v)}
-              className={`inline-flex items-center gap-1.5 text-xs font-medium rounded-md px-2.5 py-1.5 transition border ${
+              className={`inline-flex items-center gap-1.5 text-xs font-medium rounded-md px-2.5 py-1.5 border transition ${
                 emailOpen
-                  ? "bg-blue-50 border-blue-200 text-blue-700"
-                  : "bg-white border-gray-200 text-gray-700 hover:border-gray-300 hover:bg-gray-50"
+                  ? "text-blue-700 bg-blue-50 border-blue-200"
+                  : "text-gray-700 bg-white border-gray-200 hover:bg-gray-50 hover:border-gray-300"
               }`}
             >
               <Mail className="w-3.5 h-3.5" /> {emailOpen ? "Cancel" : "Email"}

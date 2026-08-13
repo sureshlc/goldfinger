@@ -6,6 +6,7 @@ import InventorySection from "./InventorySection";
 import type { InventoryLevel } from "./InventorySection";
 import ProductionSection from "./ProductionSection";
 import type { ProductionAnalysisResponse } from "./ProductionSection";
+import { formatNumber } from "@/app/lib/format";
 
 interface ItemDetailsProps {
   sku: string;
@@ -81,7 +82,7 @@ const ItemDetails: React.FC<ItemDetailsProps> = ({
               <Package className="w-5 h-5 text-blue-600" />
               <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Max Producible</p>
             </div>
-            <p className="text-2xl font-bold text-blue-700">{productionData.max_quantity_producible}</p>
+            <p className="text-2xl font-bold text-blue-700">{formatNumber(productionData.max_quantity_producible)}</p>
           </div>
 
           {/* Card 3: Total Components */}

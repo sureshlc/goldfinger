@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowLeft, AlertTriangle } from "lucide-react";
+import { ArrowLeft, AlertTriangle, RefreshCw } from "lucide-react";
 import ItemDetails from "@/app/components/ItemDetails/ItemDetails";
 import { fetchWithAuth } from "@/app/services/auth";
 import Loading from "@/app/item/[sku]/loading";
@@ -32,6 +32,8 @@ export default function ItemDetailClient({
   const [production, setProduction] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [retryable, setRetryable] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
 
   const handleBack = () => {
     if (typeof window !== "undefined" && window.history.length > 1) {
@@ -42,21 +44,30 @@ export default function ItemDetailClient({
   };
 
   useEffect(() => {
+    let cancelled = false;
+    const controller = new AbortController();
+    // Safety net: NetSuite can be slow under rate limiting; don't spin forever.
+    const timeoutId = setTimeout(() => controller.abort(), 40000);
+
     const fetchData = async () => {
       setLoading(true);
       setError(null);
+      setRetryable(false);
 
       try {
-        // Fetch all data with authentication
         const encodedSku = encodeURIComponent(sku);
+        const opts = { signal: controller.signal };
         const [itemRes, inventoryRes, productionRes] = await Promise.all([
-          fetchWithAuth(`${API_BASE_URL}/items/sku/${encodedSku}`),
-          fetchWithAuth(`${API_BASE_URL}/inventory/${encodedSku}`),
-          fetchWithAuth(`${API_BASE_URL}/production/feasibility/${encodedSku}?desired_quantity=${desiredQuantity}`),
+          fetchWithAuth(`${API_BASE_URL}/items/sku/${encodedSku}`, opts),
+          fetchWithAuth(`${API_BASE_URL}/inventory/${encodedSku}`, opts),
+          fetchWithAuth(`${API_BASE_URL}/production/feasibility/${encodedSku}?desired_quantity=${desiredQuantity}`, opts),
         ]);
+
+        if (cancelled) return;
 
         if (!itemRes.ok) {
           setError(itemRes.status === 404 ? `No item found for SKU: ${sku}` : "Failed to load item data");
+          setRetryable(itemRes.status !== 404);
           return;
         }
 
@@ -66,19 +77,34 @@ export default function ItemDetailClient({
           productionRes.ok ? productionRes.json() : null,
         ]);
 
+        if (cancelled) return;
         setItem(itemData);
         setInventory(inventoryData);
         setProduction(productionData);
       } catch (err) {
+        if (cancelled) return;
+        const timedOut = err instanceof DOMException && err.name === "AbortError";
         console.error("Error fetching item data:", err);
-        setError("Failed to load item data");
+        setError(
+          timedOut
+            ? "This is taking longer than expected — NetSuite may be busy. Please try again."
+            : "Failed to load item data"
+        );
+        setRetryable(true);
       } finally {
-        setLoading(false);
+        clearTimeout(timeoutId);
+        if (!cancelled) setLoading(false);
       }
     };
 
     fetchData();
-  }, [sku, desiredQuantity]);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timeoutId);
+      controller.abort();
+    };
+  }, [sku, desiredQuantity, reloadKey]);
 
   if (loading) {
     return (
@@ -87,7 +113,7 @@ export default function ItemDetailClient({
           <button
             type="button"
             onClick={handleBack}
-            className="inline-flex items-center gap-1.5 text-sm text-blue-600 hover:text-blue-700 mb-4 transition"
+            className="inline-flex items-center gap-1.5 text-sm font-medium text-gray-700 bg-white border border-gray-200 rounded-lg px-3 py-1.5 mb-4 shadow-sm hover:bg-gray-50 hover:border-gray-300 hover:text-gray-900 transition"
           >
             <ArrowLeft className="w-4 h-4" /> Back
           </button>
@@ -104,7 +130,7 @@ export default function ItemDetailClient({
           <button
             type="button"
             onClick={handleBack}
-            className="inline-flex items-center gap-1.5 text-sm text-blue-600 hover:text-blue-700 mb-4 transition"
+            className="inline-flex items-center gap-1.5 text-sm font-medium text-gray-700 bg-white border border-gray-200 rounded-lg px-3 py-1.5 mb-4 shadow-sm hover:bg-gray-50 hover:border-gray-300 hover:text-gray-900 transition"
           >
             <ArrowLeft className="w-4 h-4" /> Back
           </button>
@@ -112,8 +138,19 @@ export default function ItemDetailClient({
             <div className="w-14 h-14 bg-red-100 rounded-full flex items-center justify-center mx-auto mb-4">
               <AlertTriangle className="w-7 h-7 text-red-600" />
             </div>
-            <h1 className="text-xl font-bold text-gray-900 mb-2">Item Not Found</h1>
-            <p className="text-gray-500 text-sm">{error || `No item found for SKU: ${sku}`}</p>
+            <h1 className="text-xl font-bold text-gray-900 mb-2">
+              {retryable ? "Couldn’t load this item" : "Item Not Found"}
+            </h1>
+            <p className="text-gray-500 text-sm mb-4">{error || `No item found for SKU: ${sku}`}</p>
+            {retryable && (
+              <button
+                type="button"
+                onClick={() => setReloadKey((k) => k + 1)}
+                className="inline-flex items-center gap-1.5 bg-blue-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-blue-700 transition"
+              >
+                <RefreshCw className="w-4 h-4" /> Try again
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -126,7 +163,7 @@ export default function ItemDetailClient({
         <button
           type="button"
           onClick={handleBack}
-          className="inline-flex items-center gap-1.5 text-sm text-blue-600 hover:text-blue-700 mb-4 transition"
+          className="inline-flex items-center gap-1.5 text-sm font-medium text-gray-700 bg-white border border-gray-200 rounded-lg px-3 py-1.5 mb-4 shadow-sm hover:bg-gray-50 hover:border-gray-300 hover:text-gray-900 transition"
         >
           <ArrowLeft className="w-4 h-4" /> Back
         </button>

@@ -145,7 +145,7 @@ export default function MultiAnalyzeClient({ itemsParam }: { itemsParam: string 
         <button
           type="button"
           onClick={handleBack}
-          className="inline-flex items-center gap-1.5 text-sm text-blue-600 hover:text-blue-700 mb-4 transition"
+          className="inline-flex items-center gap-1.5 text-sm font-medium text-gray-700 bg-white border border-gray-200 rounded-lg px-3 py-1.5 mb-4 shadow-sm hover:bg-gray-50 hover:border-gray-300 hover:text-gray-900 transition"
         >
           <ArrowLeft className="w-4 h-4" /> Back
         </button>

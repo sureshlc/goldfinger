@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 import { fetchItemSuggestions, type ItemSuggestion } from "@/app/services/search";
 
@@ -144,8 +145,19 @@ const SkuAutocomplete: React.FC<SkuAutocompleteProps> = ({
     "w-full bg-transparent border-none outline-none text-sm text-gray-900 placeholder-gray-400 py-1 uppercase placeholder:normal-case";
 
   return (
-    <div ref={containerRef} className="w-full">
-      <div className="relative w-full">
+    <>
+      {showDropdown &&
+        typeof document !== "undefined" &&
+        createPortal(
+          <div
+            className="fixed inset-0 bg-black/30 z-40"
+            aria-hidden="true"
+            onMouseDown={() => setOpen(false)}
+          />,
+          document.body
+        )}
+      <div ref={containerRef} className={`w-full ${showDropdown ? "relative z-50" : ""}`}>
+        <div className="relative w-full">
         <input
           ref={inputRef}
           type="text"
@@ -225,7 +237,8 @@ const SkuAutocomplete: React.FC<SkuAutocompleteProps> = ({
           )}
         </ul>
       )}
-    </div>
+      </div>
+    </>
   );
 };
 

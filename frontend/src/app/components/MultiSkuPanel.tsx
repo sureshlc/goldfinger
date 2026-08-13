@@ -92,6 +92,12 @@ const MultiSkuPanel: React.FC<MultiSkuPanelProps> = ({
     setRows((prev) => (prev.length <= 1 ? prev : prev.filter((_, i) => i !== index)));
   };
 
+  // Clear all resets the rows and drops back to single-SKU search (it replaces the old close X).
+  const clearAll = () => {
+    setRows([{ sku: "", qty: "1" }]);
+    onClose();
+  };
+
   const reorderRow = (from: number, to: number) => {
     if (from === to) return;
     setRows((prev) => {
@@ -140,16 +146,25 @@ const MultiSkuPanel: React.FC<MultiSkuPanelProps> = ({
       {!hideHeader && (
         <div className="flex items-center justify-between mb-3">
           <h3 className="text-sm font-semibold text-gray-900">Multi-SKU analysis</h3>
-          {!hideClose && (
+          <div className="flex items-center gap-3">
             <button
               type="button"
-              onClick={onClose}
-              className="text-gray-400 hover:text-gray-600 transition p-1"
-              aria-label="Close multi-SKU mode"
+              onClick={clearAll}
+              className="inline-flex items-center text-xs font-medium text-gray-700 bg-white border border-gray-200 rounded-md px-2.5 py-1 hover:bg-gray-50 hover:border-gray-300 transition"
             >
-              <X className="w-4 h-4" />
+              Clear all
             </button>
-          )}
+            {!hideClose && (
+              <button
+                type="button"
+                onClick={onClose}
+                className="text-gray-400 hover:text-gray-600 transition p-1"
+                aria-label="Close multi-SKU mode"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            )}
+          </div>
         </div>
       )}
 

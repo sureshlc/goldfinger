@@ -5,14 +5,32 @@ body {
   color: var(--tw-text-opacity, 1) var(--tw-text-gray-800, #1f2937);
 }
 
-a {
-  color: var(--tw-text-blue-600, #2563eb);
-  transition: color 0.3s ease;
+/* Base-layer so Tailwind utility classes (text-white, etc.) can still override the default
+   link color — otherwise an unlayered `a` rule wins over layered utilities and hides, e.g.,
+   white button text on a colored <Link> button. */
+@layer base {
+  a {
+    color: var(--tw-text-blue-600, #2563eb);
+    transition: color 0.3s ease;
+  }
+
+  a:hover {
+    color: var(--tw-text-blue-800, #1e40af);
+  }
 }
 
-a:hover {
-  color: var(--tw-text-blue-800, #1e40af);
+/* Affordance: real pointer cursor on anything clickable (buttons default to arrow). */
+button:not(:disabled),
+[role="button"]:not([aria-disabled="true"]),
+label[for],
+summary {
+  cursor: pointer;
 }
+
+button:disabled {
+  cursor: not-allowed;
+}
+
 @keyframes shimmer {
   100% {
     transform: translateX(100%);

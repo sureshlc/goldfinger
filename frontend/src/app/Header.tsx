@@ -298,7 +298,7 @@ function HeaderContent() {
           {/* Logo/Brand */}
           <Link
             href="/"
-            className="flex items-center space-x-3 text-gray-900 hover:text-blue-600 transition group flex-shrink-0"
+            className="flex items-center space-x-3 text-blue-600 hover:text-blue-700 transition group flex-shrink-0"
           >
             <Image
               src="/Eagle-Logo.png"
@@ -543,7 +543,7 @@ export default function Header() {
     <Suspense fallback={
       <header className="bg-white/95 backdrop-blur-sm border-b border-gray-200 shadow-sm sticky top-0 z-50">
         <div className="w-full px-4 sm:px-6 lg:px-8 flex items-center justify-between h-16">
-          <Link href="/" className="flex items-center space-x-3 text-gray-900">
+          <Link href="/" className="flex items-center space-x-3 text-blue-600 hover:text-blue-700 transition">
             <Image
               src="/Eagle-Logo.png"
               alt="Company Logo"

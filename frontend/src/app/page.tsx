@@ -51,6 +51,8 @@ export default function Home() {
     setMultiRows((prev) => {
       const seeded = [...prev];
       seeded[0] = { sku: seededSku, qty: seededQty };
+      // The user clicked "+" to add one more item — give them a blank line ready to type.
+      if (seeded.length < 2) seeded.push({ sku: "", qty: "1" });
       return seeded;
     });
     setMultiMode(true);
@@ -152,6 +154,7 @@ export default function Home() {
               setRows={setMultiRows}
               onClose={exitMultiMode}
               variant="card"
+              hideClose
             />
           ) : (
             <div className="bg-white p-6 md:p-8 rounded-2xl shadow-lg border border-gray-200">

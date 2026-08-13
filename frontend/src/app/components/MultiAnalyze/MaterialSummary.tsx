@@ -4,6 +4,7 @@ import React, { useMemo, useRef, useState } from "react";
 import { CheckCircle2, AlertTriangle, Download, Mail, X } from "lucide-react";
 import { fetchWithAuth, API_BASE_URL } from "@/app/services/auth";
 import { emitToast } from "@/app/components/toast/ToastContext";
+import { formatNumber } from "@/app/lib/format";
 
 interface SubComponentDetail {
   item_id?: string;
@@ -58,7 +59,11 @@ interface BatchInputItem {
   desired_quantity: number;
 }
 
-const formatNum = (value: number): string => {
+// Display: thousands separators for readability.
+const formatNum = (value: number): string => formatNumber(value);
+
+// CSV: raw number, no separators, so spreadsheets parse it as a number.
+const formatNumRaw = (value: number): string => {
   if (!Number.isFinite(value)) return "—";
   if (Number.isInteger(value)) return value.toString();
   return parseFloat(value.toFixed(2)).toString();
@@ -193,9 +198,9 @@ const buildCsv = (rows: MaterialSummaryRow[]): string => {
       csvEscape(r.component_sku),
       csvEscape(r.component_name),
       csvEscape(r.unit || ""),
-      csvEscape(formatNum(r.total_demanded)),
-      csvEscape(formatNum(r.total_available)),
-      csvEscape(formatNum(r.shortage)),
+      csvEscape(formatNumRaw(r.total_demanded)),
+      csvEscape(formatNumRaw(r.total_available)),
+      csvEscape(formatNumRaw(r.shortage)),
       csvEscape(r.demanded_by.map((d) => d.sku).join("; ")),
     ].join(",")
   );
@@ -337,17 +342,17 @@ const MaterialSummary: React.FC<Props> = ({
           <button
             type="button"
             onClick={() => downloadCsv(rowsAll)}
-            className="inline-flex items-center gap-1.5 text-xs font-medium text-gray-700 bg-gray-50 border border-gray-200 hover:border-gray-300 hover:bg-gray-100 rounded-md px-2.5 py-1.5 transition"
+            className="inline-flex items-center gap-1.5 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-md px-3 py-1.5 shadow-sm transition"
           >
             <Download className="w-3.5 h-3.5" /> Export CSV
           </button>
           <button
             type="button"
             onClick={() => setEmailOpen((v) => !v)}
-            className={`inline-flex items-center gap-1.5 text-xs font-medium rounded-md px-2.5 py-1.5 transition border ${
+            className={`inline-flex items-center gap-1.5 text-xs font-medium rounded-md px-2.5 py-1.5 border transition ${
               emailOpen
-                ? "bg-blue-50 border-blue-200 text-blue-700"
-                : "bg-gray-50 border-gray-200 text-gray-700 hover:border-gray-300 hover:bg-gray-100"
+                ? "text-blue-700 bg-blue-50 border-blue-200"
+                : "text-gray-700 bg-white border-gray-200 hover:bg-gray-50 hover:border-gray-300"
             }`}
           >
             <Mail className="w-3.5 h-3.5" /> {emailOpen ? "Cancel" : "Email"}

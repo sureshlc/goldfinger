@@ -3,6 +3,7 @@
 import React, { useState } from "react";
 import Link from "next/link";
 import { ChevronDown, ChevronRight, CheckCircle2, AlertTriangle, XCircle, ArrowRight } from "lucide-react";
+import { formatNumber as formatNum } from "@/app/lib/format";
 
 interface SubComponentDetail {
   item_id?: string;
@@ -45,12 +46,6 @@ const isUselessName = (name?: string, sku?: string): boolean => {
   return false;
 };
 
-const formatNum = (value: number | undefined): string => {
-  if (value === undefined || value === null) return "—";
-  if (Number.isInteger(value)) return value.toString();
-  return parseFloat(value.toFixed(2)).toString();
-};
-
 const StatusBadge: React.FC<{ status: BatchItemResult["status"] }> = ({ status }) => {
   if (status === "fully_producible") {
     return (
@@ -74,48 +69,71 @@ const StatusBadge: React.FC<{ status: BatchItemResult["status"] }> = ({ status }
 };
 
 const ResultRow: React.FC<{ result: BatchItemResult }> = ({ result }) => {
-  const [open, setOpen] = useState(result.status !== "fully_producible");
+  const isFully = result.status === "fully_producible";
+  const hasShortages = result.shortages.length > 0;
+  const [open, setOpen] = useState(false);
 
   return (
-    <div className="border-b border-gray-100 last:border-b-0">
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="w-full flex items-center gap-3 px-5 py-3 text-left hover:bg-gray-50 transition"
-      >
-        {open ? (
-          <ChevronDown className="w-4 h-4 text-gray-400 flex-shrink-0" />
-        ) : (
-          <ChevronRight className="w-4 h-4 text-gray-400 flex-shrink-0" />
-        )}
+    <div className="border-b border-gray-100 last:border-b-0 px-5 py-3">
+      {/* Card face — key facts always visible, no click needed */}
+      <div className="flex items-start gap-3">
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
             <span className="font-semibold text-gray-900">{result.item_sku}</span>
-            <span className="text-xs text-gray-500">× {result.desired_quantity}</span>
+            <span className="text-xs text-gray-500">× {formatNum(result.desired_quantity)}</span>
             <StatusBadge status={result.status} />
           </div>
-          {result.item_name && (
+          {!isUselessName(result.item_name, result.item_sku) && (
             <div className="text-xs text-gray-500 mt-0.5 truncate">{result.item_name}</div>
           )}
-        </div>
-        <div className="text-right flex-shrink-0">
-          <div className="text-xs text-gray-500">Max producible</div>
-          <div className="text-base font-bold text-blue-700">
-            {result.max_quantity_producible}
-          </div>
-        </div>
-      </button>
-
-      {open && (
-        <div className="px-5 pb-4 pt-1 bg-gray-50/40">
-          {result.limiting_component && (
-            <p className="text-xs text-gray-600 mb-2">
-              Limiting component: <span className="font-medium text-gray-900">{result.limiting_component}</span>
-            </p>
+          {!isFully && (
+            <div className="flex items-center gap-x-3 gap-y-1 flex-wrap mt-1.5 text-xs">
+              {result.limiting_component && (
+                <span className="text-gray-600">
+                  Limiting:{" "}
+                  <span className="font-medium text-gray-900">{result.limiting_component}</span>
+                </span>
+              )}
+              {hasShortages && (
+                <button
+                  type="button"
+                  onClick={() => setOpen((v) => !v)}
+                  className="inline-flex items-center gap-1 font-medium text-gray-500 hover:text-gray-800 transition"
+                  aria-expanded={open}
+                >
+                  {result.shortages.length} shortage{result.shortages.length > 1 ? "s" : ""}
+                  {open ? (
+                    <ChevronDown className="w-3.5 h-3.5" />
+                  ) : (
+                    <ChevronRight className="w-3.5 h-3.5" />
+                  )}
+                </button>
+              )}
+            </div>
           )}
+        </div>
 
-          {result.shortages.length > 0 ? (
-            <div className="space-y-2 mb-3">
+        <div className="flex items-center gap-3 flex-shrink-0">
+          <div className="text-center">
+            <div className="text-base font-bold text-blue-700">
+              {formatNum(result.max_quantity_producible)}
+            </div>
+            <div className="text-xs text-gray-500">Max producible</div>
+          </div>
+          <Link
+            href={`/item/${encodeURIComponent(result.item_sku)}?quantity=${result.desired_quantity}`}
+            className="inline-flex items-center gap-1 whitespace-nowrap bg-blue-600 text-white px-3 py-1.5 rounded-lg text-xs font-medium hover:bg-blue-700 shadow-sm transition"
+          >
+            View details
+            <ArrowRight className="w-3.5 h-3.5" />
+          </Link>
+        </div>
+      </div>
+
+      {/* Optional expand — full shortage breakdown only */}
+      {open && hasShortages && (
+        <div className="mt-3 bg-gray-50/50 rounded-md p-2.5">
+          <div className="space-y-2">
               {result.shortages.map((s, idx) => {
                 const subs = (s.sub_component_details || [])
                   .map((sub) => {
@@ -209,18 +227,7 @@ const ResultRow: React.FC<{ result: BatchItemResult }> = ({ result }) => {
                   </React.Fragment>
                 );
               })}
-            </div>
-          ) : (
-            <p className="text-xs text-gray-500 mb-3">No shortages reported for this SKU.</p>
-          )}
-
-          <Link
-            href={`/item/${encodeURIComponent(result.item_sku)}?quantity=${result.desired_quantity}`}
-            className="inline-flex items-center gap-1.5 text-xs font-semibold text-blue-600 hover:text-blue-700"
-          >
-            View full details
-            <ArrowRight className="w-3.5 h-3.5" />
-          </Link>
+          </div>
         </div>
       )}
     </div>
