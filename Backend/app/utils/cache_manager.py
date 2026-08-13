@@ -176,6 +176,11 @@ def make_bom_cache_key(item_sku: str) -> str:
     return f"bom:{item_sku}"
 
 
+def make_bom_revision_cache_key(item_id: str) -> str:
+    # "bom:" prefix -> inherits the BOM TTL and is swept by invalidate_pattern('bom:')
+    return f"bom:revision:{item_id}"
+
+
 def make_item_details_cache_key(item_id: str) -> str:
     return f"item_details:{item_id}"
 

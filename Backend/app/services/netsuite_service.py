@@ -111,7 +111,9 @@ class NetSuiteService:
                     # Handle rate limiting (429)
                     if response.status_code == 429:
                         self.__class__._rate_limit_hits += 1
-                        retry_after = int(response.headers.get("Retry-After", "60"))
+                        # Cap the interactive backoff: respect a short Retry-After, but never
+                        # wait the full 60s+ NetSuite sometimes implies — a spinning UI is worse.
+                        retry_after = min(int(response.headers.get("Retry-After", "10")), 10)
                         logger.warning(
                             f"NetSuite rate limit hit (429). Waiting {retry_after}s "
                             f"(attempt {attempt + 1}/{max_retries})"
@@ -163,3 +165,101 @@ class NetSuiteService:
 
         # Should not reach here, but just in case
         raise httpx.HTTPError(f"NetSuite request failed after {max_retries} attempts")
+
+    def _record_base_url(self) -> str:
+        """REST *record* API base, derived from the SuiteQL base_url.
+
+        base_url points at .../services/rest/query/v1/suiteql; the record API lives at
+        .../services/rest/record/v1.
+        """
+        root = self.base_url.split("/services/")[0]
+        return f"{root}/services/rest/record/v1"
+
+    async def get_record(self, path: str, max_retries: int = 3) -> Optional[Dict[str, Any]]:
+        """GET a NetSuite REST *record* (e.g. 'assemblyItem/123?expandSubResources=true').
+
+        Returns the parsed JSON record, or None on a 4xx (e.g. 404 when an item isn't an
+        assembly) so callers can fall back gracefully. Mirrors execute_suiteql's OAuth signing,
+        concurrency limiting, and 429/5xx retry behaviour.
+        """
+        start_time = time.time()
+        url = f"{self._record_base_url()}/{path.lstrip('/')}"
+
+        # Ensure client is ready (lazy init for safety)
+        if self.__class__._client is None:
+            await self.__class__.startup()
+
+        semaphore = self.__class__._semaphore
+
+        for attempt in range(max_retries):
+            async with semaphore:
+                try:
+                    # Re-sign each attempt (OAuth nonce/timestamp must be fresh)
+                    req = Req(method="GET", url=url, headers={"Prefer": "transient"})
+                    prepared = req.prepare()
+                    signed = self.oauth(prepared)
+
+                    self.__class__._total_requests += 1
+
+                    response = await self.__class__._client.request(
+                        method=signed.method,
+                        url=signed.url,
+                        headers=dict(signed.headers),
+                    )
+
+                    # Handle rate limiting (429)
+                    if response.status_code == 429:
+                        self.__class__._rate_limit_hits += 1
+                        # Cap the interactive backoff: respect a short Retry-After, but never
+                        # wait the full 60s+ NetSuite sometimes implies — a spinning UI is worse.
+                        retry_after = min(int(response.headers.get("Retry-After", "10")), 10)
+                        logger.warning(
+                            f"NetSuite rate limit hit (429) on GET {path}. Waiting {retry_after}s "
+                            f"(attempt {attempt + 1}/{max_retries})"
+                        )
+                        if attempt < max_retries - 1:
+                            self.__class__._total_retries += 1
+                            await asyncio.sleep(retry_after)
+                            continue
+                        response.raise_for_status()
+
+                    # Retry on 5xx
+                    if response.status_code >= 500:
+                        self.__class__._total_errors += 1
+                        if attempt < max_retries - 1:
+                            backoff = (1 * (2 ** attempt)) + random.uniform(0, 0.5)
+                            self.__class__._total_retries += 1
+                            logger.warning(
+                                f"NetSuite 5xx ({response.status_code}) on GET {path}. "
+                                f"Retrying in {backoff:.1f}s (attempt {attempt + 1}/{max_retries})"
+                            )
+                            await asyncio.sleep(backoff)
+                            continue
+                        response.raise_for_status()
+
+                    # 4xx (non-429): return None so callers can fall back (e.g. 404 for non-assembly)
+                    if response.status_code >= 400:
+                        self.__class__._total_errors += 1
+                        logger.info(f"NetSuite GET {path} returned {response.status_code}")
+                        return None
+
+                    data = response.json()
+                    elapsed = time.time() - start_time
+                    logger.info(f"[TIMING] NetSuite GET {path} took {elapsed:.3f}s")
+                    return data
+
+                except (httpx.ConnectError, httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout) as e:
+                    self.__class__._total_errors += 1
+                    if attempt < max_retries - 1:
+                        backoff = (1 * (2 ** attempt)) + random.uniform(0, 0.5)
+                        self.__class__._total_retries += 1
+                        logger.warning(
+                            f"NetSuite connection error on GET {path}: {e}. "
+                            f"Retrying in {backoff:.1f}s (attempt {attempt + 1}/{max_retries})"
+                        )
+                        await asyncio.sleep(backoff)
+                        continue
+                    logger.error(f"NetSuite GET {path} failed after {max_retries} attempts: {e}")
+                    return None
+
+        return None

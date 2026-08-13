@@ -20,6 +20,7 @@ from app.utils.identifier_resolution import resolve_sku_or_id
 from app.utils.cache_manager import (
     CacheManager,
     make_bom_cache_key,
+    make_bom_revision_cache_key,
     make_item_details_cache_key,
     make_resolution_cache_key,
     make_inventory_cache_key,
@@ -1188,6 +1189,8 @@ class ProductionService:
 
         details_key = make_item_details_cache_key(item_id)
         await self.cache_manager.invalidate(details_key)
+
+        await self.cache_manager.invalidate(make_bom_revision_cache_key(item_id))
 
         await self.cache_manager.invalidate_pattern(f"inventory:{item_id}")
 
