@@ -113,6 +113,88 @@ class ProductionService:
     async def _get_bom(self, item_sku: str) -> List[Dict]:
         return await self.bom_service.get_full_bom(item_sku)
 
+    @staticmethod
+    def _build_bom_tree(bom_components: List[Dict]) -> List[Dict]:
+        """Rebuild the BOM tree from the flat DFS-preorder list (each row carries its depth in 'level')."""
+        roots, stack = [], []
+        for comp in bom_components:
+            node = {"comp": comp, "children": []}
+            lvl = comp.get("level", 0)
+            while stack and stack[-1][0] >= lvl:
+                stack.pop()
+            (stack[-1][1]["children"] if stack else roots).append(node)
+            stack.append((lvl, node))
+        return roots
+
+    @classmethod
+    def _collapse_phantom_bom(cls, bom_components: List[Dict]) -> List[Dict]:
+        """Collapse the multi-level BOM for DISPLAY: descend through phantom nodes and keep the
+        first non-phantom (stocked) descendant as a leaf; drop the phantom nodes themselves.
+
+        Quantities are cumulative — a surviving material's quantity is multiplied by the
+        quantities of the dropped phantom ancestors, so the flat list is correct per finished good.
+
+        Display-only — does NOT touch the feasibility calculation (get_max_producible already ran
+        on the full tree). Returns COPIES; the original (possibly cached) rows are left untouched.
+        """
+        out: List[Dict] = []
+
+        def walk(nodes, factor):
+            for n in nodes:
+                comp = n["comp"]
+                qty = float(comp.get("quantity_required", 0) or 0)
+                if str(comp.get("is_phantom")).lower() == "true":
+                    walk(n["children"], factor * qty)   # phantom: fold its qty into the multiplier
+                else:
+                    emitted = dict(comp)                 # copy — don't mutate the cached BOM
+                    emitted["quantity_required"] = qty * factor
+                    out.append(emitted)
+
+        walk(cls._build_bom_tree(bom_components), 1.0)
+        return out
+
+    @classmethod
+    def _stocked_name_for_limiting(cls, bom_components: List[Dict], limiting_info: Optional[Dict]) -> Optional[str]:
+        """If the limiting component is a phantom, report the real stocked material it collapses to
+        (its first non-phantom descendant) rather than the phantom's name."""
+        if not limiting_info:
+            return None
+        default_name = limiting_info.get("item_name")
+        lim_sku = str(limiting_info.get("item_sku", "") or "")
+        lim_id = str(limiting_info.get("item_id", "") or "")
+
+        found = {"node": None}
+
+        def find(nodes):
+            for n in nodes:
+                c = n["comp"]
+                if (lim_sku and str(c.get("component_sku", "")) == lim_sku) or \
+                   (lim_id and str(c.get("internal_id", "")) == lim_id):
+                    found["node"] = n
+                    return True
+                if find(n["children"]):
+                    return True
+            return False
+
+        find(cls._build_bom_tree(bom_components))
+        node = found["node"]
+        if not node or str(node["comp"].get("is_phantom")).lower() != "true":
+            return default_name
+
+        def first_stocked(n):
+            if str(n["comp"].get("is_phantom")).lower() != "true":
+                return n["comp"]
+            for ch in n["children"]:
+                r = first_stocked(ch)
+                if r:
+                    return r
+            return None
+
+        stocked = first_stocked(node)
+        if stocked:
+            return stocked.get("component_displayname") or stocked.get("component_name") or default_name
+        return default_name
+
     async def _get_inventory(self, item_ids: List[str], location_name: Optional[str] = None) -> List[Dict]:
         if self.cache_manager is None:
             return await self.inventory_service.get_inventory_levels(item_ids, location_name)
@@ -485,17 +567,22 @@ class ProductionService:
 
         can_produce = max_producible_quantity >= desired_quantity
 
-        limiting_component = limiting_info.get("item_name") if limiting_info else None
+        # Report the real stocked material as the limiter, not a phantom pass-through.
+        limiting_component = self._stocked_name_for_limiting(bom_components, limiting_info)
+
+        # Display-only: collapse phantom pass-throughs so the returned BOM shows the real stocked
+        # materials (the feasibility calc above already used the full multi-level tree).
+        display_components = self._collapse_phantom_bom(bom_components)
 
         formatted_bom = []
-        for comp in bom_components:
+        for comp in display_components:
             formatted_bom.append({
                 "item_id": comp.get("bom_id", ""),
                 "item_name": comp.get("component_displayname", ""),
                 "item_sku": comp.get("component_sku", ""),
                 "quantity_required": round(float(comp.get("quantity_required", 0)) * desired_quantity, 5),
                 "unit": comp.get("unit") or "N/A",
-                "level": comp.get("level", 0)
+                "level": 0
             })
 
         sku_to_id = {}
@@ -521,7 +608,7 @@ class ProductionService:
                     sku_to_id[sku] = resolved_id
 
         component_availability = []
-        for comp in bom_components:
+        for comp in display_components:
             comp_sku = comp.get("component_sku", "")
             comp_name = comp.get("component_displayname", comp.get("displayname", ""))
             unit = comp.get("unit")
@@ -890,6 +977,27 @@ class ProductionService:
         #        - leaf  -> contributes its own demand
         #        - sub-assembly -> demand expands into recipe (qty_per_unit × parent_required)
         # ------------------------------------------------------------------
+        # Phantom-aware drilling for the materials list: expand a component through PHANTOM
+        # sub-assemblies down to the real stocked material; stop at non-phantom (stocked) items
+        # even if they have a recipe (consistent with the single-SKU collapse). Also grab
+        # sku/name/unit straight from the BOM rows so drilled-in leaves render properly.
+        phantom_ids = set()
+        bom_id_to_sku: Dict[str, str] = {}
+        bom_id_to_name: Dict[str, str] = {}
+        bom_id_to_unit: Dict[str, str] = {}
+        for meta in ordered_meta:
+            for c in meta["bom"]:
+                cid = comp_sku_to_id.get(c.get("component_sku", ""))
+                if not cid:
+                    continue
+                if str(c.get("is_phantom")).lower() == "true":
+                    phantom_ids.add(cid)
+                bom_id_to_sku.setdefault(cid, c.get("component_sku", ""))
+                _nm = c.get("component_displayname") or c.get("component_name") or c.get("displayname") or ""
+                if _nm:
+                    bom_id_to_name.setdefault(cid, _nm)
+                bom_id_to_unit.setdefault(cid, c.get("unit", "") or "")
+
         leaf_demand: Dict[str, Dict] = {}  # comp_id -> {"total": float, "by_sku": {sku: float}}
 
         def _add_leaf_demand(comp_id: str, sku: str, qty: float):
@@ -898,6 +1006,15 @@ class ProductionService:
             entry = leaf_demand.setdefault(comp_id, {"total": 0.0, "by_sku": {}})
             entry["total"] += qty
             entry["by_sku"][sku] = entry["by_sku"].get(sku, 0.0) + qty
+
+        def _expand_demand(comp_id: str, sku: str, qty: float, _depth: int = 0):
+            if qty <= 0:
+                return
+            if _depth < 6 and comp_id in phantom_ids and comp_id in sub_assembly_recipes:
+                for r in sub_assembly_recipes[comp_id]:
+                    _expand_demand(r["sub_comp_id"], sku, qty * float(r.get("qty_per_unit", 0)), _depth + 1)
+            else:
+                _add_leaf_demand(comp_id, sku, qty)
 
         for meta in ordered_meta:
             sku_label = meta["item_sku"]
@@ -911,24 +1028,16 @@ class ProductionService:
                     continue
                 req_per_unit = float(comp.get("quantity_required", 0))
                 req_total = req_per_unit * desired_qty_meta
-                if comp_id in sub_assembly_recipes:
-                    for r in sub_assembly_recipes[comp_id]:
-                        _add_leaf_demand(
-                            r["sub_comp_id"],
-                            sku_label,
-                            req_total * float(r.get("qty_per_unit", 0)),
-                        )
-                else:
-                    _add_leaf_demand(comp_id, sku_label, req_total)
+                _expand_demand(comp_id, sku_label, req_total)
 
         material_summary: List[Dict] = []
         for cid, info_d in leaf_demand.items():
             available = inventory_map.get(cid, 0)
             demanded = info_d["total"]
             material_summary.append({
-                "component_sku": comp_id_to_sku.get(cid, cid),
-                "component_name": comp_id_to_name.get(cid, comp_id_to_sku.get(cid, "")),
-                "unit": comp_id_to_unit.get(cid, ""),
+                "component_sku": bom_id_to_sku.get(cid) or comp_id_to_sku.get(cid, cid),
+                "component_name": bom_id_to_name.get(cid) or comp_id_to_name.get(cid) or bom_id_to_sku.get(cid, cid),
+                "unit": bom_id_to_unit.get(cid) or comp_id_to_unit.get(cid, ""),
                 "total_demanded": demanded,
                 "total_available": available,
                 "shortage": max(0.0, demanded - available),
@@ -998,6 +1107,21 @@ class ProductionService:
                 min_prod = 0
             return on_hand + min_prod
 
+        def _drill_stocked_leaves(comp_id, factor: float = 1.0, _depth: int = 0):
+            """Given a sub-assembly, return its real stocked leaves by drilling through PHANTOM
+            children (with cumulative qty_per_unit). Non-phantom children are returned as-is, so a
+            phantom straw resolves to its Danimer resin instead of stopping at a phantom base."""
+            out = []
+            if _depth < 6 and comp_id in sub_assembly_recipes:
+                for r in sub_assembly_recipes[comp_id]:
+                    child = r["sub_comp_id"]
+                    child_factor = factor * float(r.get("qty_per_unit", 0))
+                    if child in phantom_ids and child in sub_assembly_recipes:
+                        out.extend(_drill_stocked_leaves(child, child_factor, _depth + 1))
+                    else:
+                        out.append({"sub_comp_id": child, "qty_per_unit": child_factor})
+            return out
+
         results: List[Dict] = []
 
         for meta in ordered_meta:
@@ -1021,6 +1145,7 @@ class ProductionService:
 
             max_producible = float('inf')
             limiting_component = None
+            limiting_comp = None
             shortages = []
 
             for comp in direct_components:
@@ -1032,6 +1157,7 @@ class ProductionService:
                     # Unresolvable component — blocked
                     max_producible = 0
                     limiting_component = comp_name or comp_sku
+                    limiting_comp = comp
                     shortages.append({
                         "item_id": comp_sku,
                         "item_name": comp_name,
@@ -1060,39 +1186,62 @@ class ProductionService:
                 if max_from_this < max_producible:
                     max_producible = max_from_this
                     limiting_component = comp_name or comp_sku
+                    limiting_comp = comp
 
                 if available < required_total:
-                    shortage_entry = {
-                        "item_id": comp_id,
-                        "item_name": comp_name,
-                        "item_sku": comp_sku,
-                        "required_quantity": required_total,
-                        "available_quantity": available,
-                        # Pre-deduction batch-wide pool (for cross-SKU aggregation).
-                        "initial_quantity": inventory_map.get(comp_id, 0),
-                        "shortage_quantity": required_total - available,
-                        "unit": comp.get("unit", "") or "",
-                        "reason": "Insufficient shared inventory",
-                    }
-                    # 2F: Enrich sub-assembly shortages with sub-component details
-                    if comp_id in sub_assembly_recipes:
-                        sub_shortages = []
-                        for r in sub_assembly_recipes[comp_id]:
-                            sub_avail = shared_ledger.get(r["sub_comp_id"], 0)
-                            sub_info = comp_id_to_info.get(r["sub_comp_id"], {})
-                            sub_shortages.append({
-                                "item_id": r["sub_comp_id"],
-                                "item_sku": r.get("sub_sku", r["sub_comp_id"]),
-                                "item_name": sub_info.get("item_name", r["sub_comp_id"]),
-                                "available_quantity": sub_avail,
-                                # Pre-deduction batch-wide pool (for cross-SKU aggregation).
-                                "initial_quantity": inventory_map.get(r["sub_comp_id"], 0),
-                                "qty_per_unit": r["qty_per_unit"],
-                                "unit": r.get("unit", "") or "",
+                    if comp_id in phantom_ids and comp_id in sub_assembly_recipes:
+                        # Phantom sub-assembly (no own stock, on_hand=0): report the REAL stocked
+                        # materials underneath it directly — drop the phantom row entirely. Leaf
+                        # demand = sub-assembly demand x cumulative qty_per_unit down the chain.
+                        for leaf in _drill_stocked_leaves(comp_id):
+                            lid = leaf["sub_comp_id"]
+                            leaf_required = required_total * float(leaf["qty_per_unit"])
+                            leaf_avail = shared_ledger.get(lid, 0)
+                            if leaf_required <= leaf_avail:
+                                continue  # this stocked material isn't the constraint
+                            sub_info = comp_id_to_info.get(lid, {})
+                            shortages.append({
+                                "item_id": lid,
+                                "item_sku": bom_id_to_sku.get(lid) or sub_info.get("item_sku") or lid,
+                                "item_name": bom_id_to_name.get(lid) or sub_info.get("item_name") or lid,
+                                "required_quantity": leaf_required,
+                                "available_quantity": leaf_avail,
+                                "initial_quantity": inventory_map.get(lid, 0),
+                                "shortage_quantity": leaf_required - leaf_avail,
+                                "unit": bom_id_to_unit.get(lid) or "",
+                                "reason": "Insufficient shared inventory",
                             })
-                        shortage_entry["reason"] = "Insufficient sub-assembly production capacity"
-                        shortage_entry["sub_component_details"] = sub_shortages
-                    shortages.append(shortage_entry)
+                    else:
+                        shortage_entry = {
+                            "item_id": comp_id,
+                            "item_name": comp_name,
+                            "item_sku": comp_sku,
+                            "required_quantity": required_total,
+                            "available_quantity": available,
+                            # Pre-deduction batch-wide pool (for cross-SKU aggregation).
+                            "initial_quantity": inventory_map.get(comp_id, 0),
+                            "shortage_quantity": required_total - available,
+                            "unit": comp.get("unit", "") or "",
+                            "reason": "Insufficient shared inventory",
+                        }
+                        # Non-phantom sub-assembly: keep its sub-component breakdown.
+                        if comp_id in sub_assembly_recipes:
+                            sub_shortages = []
+                            for leaf in _drill_stocked_leaves(comp_id):
+                                lid = leaf["sub_comp_id"]
+                                sub_info = comp_id_to_info.get(lid, {})
+                                sub_shortages.append({
+                                    "item_id": lid,
+                                    "item_sku": bom_id_to_sku.get(lid) or sub_info.get("item_sku") or lid,
+                                    "item_name": bom_id_to_name.get(lid) or sub_info.get("item_name") or lid,
+                                    "available_quantity": shared_ledger.get(lid, 0),
+                                    "initial_quantity": inventory_map.get(lid, 0),
+                                    "qty_per_unit": leaf["qty_per_unit"],
+                                    "unit": bom_id_to_unit.get(lid) or "",
+                                })
+                            shortage_entry["reason"] = "Insufficient sub-assembly production capacity"
+                            shortage_entry["sub_component_details"] = sub_shortages
+                        shortages.append(shortage_entry)
 
             if max_producible == float('inf'):
                 max_producible = 0  # No components found
@@ -1140,6 +1289,15 @@ class ProductionService:
                 status = "blocked"
 
             can_produce = max_producible >= desired_qty
+
+            # Report the real stocked material as the limiter, not a phantom pass-through
+            # (consistent with the single-SKU feasibility endpoint).
+            if limiting_comp is not None:
+                limiting_component = self._stocked_name_for_limiting(meta["bom"], {
+                    "item_name": limiting_component,
+                    "item_sku": limiting_comp.get("component_sku", ""),
+                    "item_id": limiting_comp.get("internal_id", ""),
+                })
 
             results.append({
                 "item_sku": meta["item_sku"],
