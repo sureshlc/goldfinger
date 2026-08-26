@@ -1,6 +1,7 @@
 "use client";
 
 import React from "react";
+import { formatNumber } from "@/app/lib/format";
 
 export interface InventoryLevel {
   item_id: string;
@@ -35,7 +36,7 @@ const InventorySection: React.FC<InventorySectionProps> = ({ data }) => {
           </div>
           <div>
             <p className="text-xs text-gray-500 mb-1">Available Quantity</p>
-            <p className="text-lg font-bold text-blue-600">{data.available_quantity}</p>
+            <p className="text-lg font-bold text-blue-600">{formatNumber(data.available_quantity)}</p>
           </div>
           <div>
             <p className="text-xs text-gray-500 mb-1">Location</p>

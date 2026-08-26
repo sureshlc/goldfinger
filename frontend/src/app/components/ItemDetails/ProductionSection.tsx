@@ -5,6 +5,7 @@ import { useRouter, usePathname } from "next/navigation";
 import { Download, Mail, X } from "lucide-react";
 import { fetchWithAuth, API_BASE_URL } from "@/app/services/auth";
 import { emitToast } from "@/app/components/toast/ToastContext";
+import { formatNumber } from "@/app/lib/format";
 
 export interface BOMComponent {
   item_id: string;
@@ -79,21 +80,15 @@ const ProductionSection: React.FC<ProductionSectionProps> = ({
   const [sending, setSending] = useState(false);
   const recipientsRef = useRef<HTMLInputElement>(null);
 
-  // Helper function to format numbers intelligently
-  const formatQuantity = (value: number): string => {
-    if (Number.isInteger(value)) {
-      return value.toString();
-    }
-    return parseFloat(value.toFixed(5)).toString();
-  };
+  // Display: thousands separators for readability.
+  const formatQuantity = (value: number): string => formatNumber(value, 5);
+  const formatAvailable = (value: number): string => formatNumber(value, 2);
 
-  // Helper function for available quantity (max 2 decimals)
-  const formatAvailable = (value: number): string => {
-    if (Number.isInteger(value)) {
-      return value.toString();
-    }
-    return parseFloat(value.toFixed(2)).toString();
-  };
+  // CSV: raw number, no separators, so spreadsheets parse it as a number.
+  const formatQuantityRaw = (value: number): string =>
+    Number.isInteger(value) ? value.toString() : parseFloat(value.toFixed(5)).toString();
+  const formatAvailableRaw = (value: number): string =>
+    Number.isInteger(value) ? value.toString() : parseFloat(value.toFixed(2)).toString();
 
   useEffect(() => {
     setIsUpdating(false);
@@ -123,11 +118,12 @@ const ProductionSection: React.FC<ProductionSectionProps> = ({
     return cell;
   };
 
-  // Backend tags water (and any other infinite-supply item) with display_quantity="Unlimited"
-  // and available_quantity=999999. Treat both as the universal "Infinite" indicator.
+  // Backend tags truly-unlimited items (water) with display_quantity="Unlimited" and the
+  // sentinel available_quantity=999999. Match that sentinel EXACTLY (or a non-finite value) —
+  // NOT `>= 999999`, which would mislabel a genuinely large real stock (e.g. 857M) as Infinite.
   const isInfiniteAvail = (display?: string, qty?: number): boolean => {
     if (display && /^(unlimited|infinite)$/i.test(display.trim())) return true;
-    if (qty !== undefined && qty >= 999999) return true;
+    if (qty !== undefined && (qty === 999999 || !Number.isFinite(qty))) return true;
     return false;
   };
 
@@ -159,14 +155,14 @@ const ProductionSection: React.FC<ProductionSectionProps> = ({
       const shortageQty = c.shortage_info?.shortage_quantity ?? 0;
       const availableDisplay = isInfiniteAvail(c.display_quantity, c.available_quantity)
         ? "Infinite"
-        : formatAvailable(c.available_quantity);
+        : formatAvailableRaw(c.available_quantity);
       return [
         csvEscape(c.item_sku || ""),
         csvEscape(c.item_name || ""),
         csvEscape(c.unit || ""),
-        csvEscape(formatQuantity(required)),
+        csvEscape(formatQuantityRaw(required)),
         csvEscape(availableDisplay),
-        csvEscape(formatQuantity(shortageQty)),
+        csvEscape(formatQuantityRaw(shortageQty)),
       ].join(",");
     });
 
@@ -286,7 +282,7 @@ const ProductionSection: React.FC<ProductionSectionProps> = ({
             </h3>
             <div className="text-right">
               <p className="text-sm text-gray-600">Max Producible</p>
-              <p className="font-bold text-2xl text-blue-600">{productionData.max_quantity_producible}</p>
+              <p className="font-bold text-2xl text-blue-600">{formatNumber(productionData.max_quantity_producible)}</p>
             </div>
           </div>
 
@@ -521,7 +517,7 @@ const ProductionSection: React.FC<ProductionSectionProps> = ({
                       </div>
                       <div>
                         <p className="text-gray-500">Max Units</p>
-                        <p className="font-semibold">{comp.display_quantity || comp.max_units_possible}</p>
+                        <p className="font-semibold">{comp.display_quantity || formatNumber(comp.max_units_possible)}</p>
                       </div>
                       <div>
                         <p className="text-gray-500">Status</p>
