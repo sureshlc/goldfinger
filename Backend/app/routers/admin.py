@@ -181,8 +181,11 @@ async def list_items(
     db: AsyncSession = Depends(get_db),
 ):
     from app.database.repositories.item_repo import get_all_items
+    from app.database.repositories.bom_repo import get_formula_refreshed_map
 
     result = await get_all_items(db, page, per_page, search)
+    # "Formula as of" — cached BOM refresh time per item (admin-only column).
+    refreshed = await get_formula_refreshed_map(db, [int(i.id) for i in result["items"]])
     return {
         "items": [
             {
@@ -191,6 +194,8 @@ async def list_items(
                 "name": item.name,
                 "created_at": item.created_at.isoformat() if item.created_at else None,
                 "updated_at": item.updated_at.isoformat() if item.updated_at else None,
+                "formula_refreshed_at": refreshed[int(item.id)].isoformat()
+                if int(item.id) in refreshed and refreshed[int(item.id)] else None,
             }
             for item in result["items"]
         ],
@@ -198,6 +203,40 @@ async def list_items(
         "page": result["page"],
         "per_page": result["per_page"],
     }
+
+
+@router.post("/boms/refresh/{item_id}")
+async def refresh_bom_formula(item_id: str, admin: User = Depends(get_admin_user)):
+    """Force-refresh ONE item's cached BOM formula from NetSuite (synchronous)."""
+    from app.services.service_registry import get_bom_service
+    try:
+        return await get_bom_service().refresh_bom_formula(item_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/boms/refresh")
+async def refresh_all_bom_formulas(admin: User = Depends(get_admin_user)):
+    """Start a background refresh of ALL cached BOM formulas (paced). One run at a time."""
+    import asyncio
+    from app.services.service_registry import get_bom_service
+    from app.services.bom_service import get_bom_refresh_status, _refresh_tasks
+
+    status = get_bom_refresh_status()
+    if status.get("running"):
+        return {"status": "already_running", **status}
+
+    task = asyncio.create_task(get_bom_service().refresh_all_bom_formulas())
+    _refresh_tasks.add(task)
+    task.add_done_callback(_refresh_tasks.discard)
+    return {"status": "started", "total": status.get("total", 0)}
+
+
+@router.get("/boms/refresh/status")
+async def bom_refresh_status(admin: User = Depends(get_admin_user)):
+    """Progress of the last/current 'refresh all' run."""
+    from app.services.bom_service import get_bom_refresh_status
+    return get_bom_refresh_status()
 
 
 @router.post("/items")

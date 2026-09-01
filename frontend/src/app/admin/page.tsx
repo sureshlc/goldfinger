@@ -3,7 +3,7 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { ArrowLeft, Eye, EyeOff, Upload, Download, X, Check, X as XIcon, Key, Copy, ClipboardCheck } from "lucide-react";
+import { ArrowLeft, Eye, EyeOff, Upload, Download, X, Check, X as XIcon, Key, Copy, ClipboardCheck, RefreshCw } from "lucide-react";
 import { useAuth } from "../contexts/AuthContext";
 import { fetchWithAuth, API_BASE_URL } from "../services/auth";
 
@@ -35,6 +35,7 @@ interface AdminItem {
   id: number;
   sku: string;
   name: string | null;
+  formula_refreshed_at?: string | null;
 }
 
 interface APIKeyItem {
@@ -292,6 +293,8 @@ function ItemsTab() {
   const [importResult, setImportResult] = useState<ImportResult | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const perPage = 20;
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshMsg, setRefreshMsg] = useState<string | null>(null);
 
   const fetchItems = useCallback(async () => {
     setLoading(true);
@@ -312,6 +315,47 @@ function ItemsTab() {
   useEffect(() => {
     fetchItems();
   }, [fetchItems]);
+
+  const handleRefreshFormulas = async () => {
+    setRefreshing(true);
+    setRefreshMsg("Starting…");
+    try {
+      await fetchWithAuth(`${API_BASE_URL}/admin/boms/refresh`, { method: "POST" });
+      const poll = async () => {
+        try {
+          const res = await fetchWithAuth(`${API_BASE_URL}/admin/boms/refresh/status`);
+          const s = await res.json();
+          if (s.running) {
+            setRefreshMsg(`Refreshing ${s.done}/${s.total}…`);
+            setTimeout(poll, 2000);
+          } else {
+            const sum = s.last_summary;
+            setRefreshMsg(
+              sum ? `Done: ${sum.refreshed}/${sum.total} refreshed${sum.errors ? `, ${sum.errors} errors` : ""}` : "Done"
+            );
+            setRefreshing(false);
+            fetchItems();
+          }
+        } catch {
+          setRefreshMsg("Status check failed");
+          setRefreshing(false);
+        }
+      };
+      setTimeout(poll, 1500);
+    } catch {
+      setRefreshMsg("Failed to start");
+      setRefreshing(false);
+    }
+  };
+
+  const handleRefreshItem = async (id: number) => {
+    try {
+      await fetchWithAuth(`${API_BASE_URL}/admin/boms/refresh/${id}`, { method: "POST" });
+      fetchItems();
+    } catch {
+      /* ignore */
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -559,7 +603,18 @@ function ItemsTab() {
           }}
           className="border border-gray-300 rounded-lg px-3 py-2 text-sm w-64 focus:outline-none focus:ring-2 focus:ring-blue-500"
         />
-        <div className="flex gap-2">
+        <div className="flex items-center gap-2">
+          {refreshMsg && <span className="text-xs text-gray-500">{refreshMsg}</span>}
+          <button
+            onClick={handleRefreshFormulas}
+            disabled={refreshing}
+            title="Re-fetch all cached BOM formulas from NetSuite"
+            className="inline-flex items-center gap-1.5 bg-gray-100 text-gray-700 px-4 py-2 rounded-lg text-sm font-medium hover:bg-gray-200 border border-gray-300 disabled:opacity-50"
+            type="button"
+          >
+            <RefreshCw className={`w-4 h-4 ${refreshing ? "animate-spin" : ""}`} />
+            Refresh formulas
+          </button>
           <button
             onClick={() => { setShowImport(true); setImportResult(null); }}
             className="inline-flex items-center gap-1.5 bg-gray-100 text-gray-700 px-4 py-2 rounded-lg text-sm font-medium hover:bg-gray-200 border border-gray-300"
@@ -726,6 +781,7 @@ function ItemsTab() {
                     <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">ID</th>
                     <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">SKU</th>
                     <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Name</th>
+                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Formula as of</th>
                     <th className="px-4 py-3 text-right text-xs font-semibold text-gray-500 uppercase tracking-wide">Actions</th>
                   </tr>
                 </thead>
@@ -735,7 +791,13 @@ function ItemsTab() {
                       <td className="px-4 py-2.5 text-gray-600">{item.id}</td>
                       <td className="px-4 py-2.5 text-gray-900 font-semibold">{item.sku}</td>
                       <td className="px-4 py-2.5 text-gray-700">{item.name || "-"}</td>
+                      <td className="px-4 py-2.5 text-gray-500 text-xs whitespace-nowrap">
+                        {item.formula_refreshed_at ? new Date(item.formula_refreshed_at).toLocaleDateString() : "—"}
+                      </td>
                       <td className="px-4 py-2.5 text-right">
+                        <button onClick={() => handleRefreshItem(item.id)} className="text-gray-500 hover:text-blue-600 text-sm font-medium mr-3" type="button" title="Refresh this item's formula">
+                          Refresh
+                        </button>
                         <button onClick={() => handleEdit(item)} className="text-blue-600 hover:text-blue-700 text-sm font-medium mr-3" type="button">
                           Edit
                         </button>
