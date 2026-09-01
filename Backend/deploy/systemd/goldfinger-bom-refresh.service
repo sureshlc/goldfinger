@@ -22,7 +22,10 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ReadWritePaths=/opt/goldfinger/Backend
-ProtectHome=true
+# read-only (not true): asyncpg's SSL layer stats ~/.postgresql/postgresql.key on connect;
+# ProtectHome=true makes that raise PermissionError. read-only still blocks writes to home
+# while letting the (absent) cert path resolve normally.
+ProtectHome=read-only
 # Standalone process (not under PM2). Output goes to the journal:
 #   journalctl -u goldfinger-bom-refresh
 StandardOutput=journal
