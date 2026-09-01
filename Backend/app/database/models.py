@@ -40,6 +40,53 @@ class ItemDB(Base):
     )
 
 
+class BOMFormulaDB(Base):
+    """Cached BOM 'formula' metadata for one assembly item (keyed by NetSuite internal id).
+
+    The recipe (direct components) lives in bom_component. Keyed by item id, NOT sku, so it is
+    unaffected by duplicate SKUs (e.g. an Assembly + InvtPart sharing one itemid).
+    """
+    __tablename__ = "bom_formula"
+
+    assembly_item_id = Column(BigInteger, primary_key=True, autoincrement=False)  # NetSuite internal id
+    revision_id = Column(String(64), nullable=True)          # current bomRevision id (native); null for legacy
+    source = Column(String(16), nullable=False)              # 'legacy' | 'native'
+    has_bom = Column(Boolean, nullable=False, default=False) # False => no BOM (negative cache)
+    refreshed_at = Column(DateTime(timezone=True), server_default=func.now())
+    last_error = Column(String(512), nullable=True)
+
+    components = relationship(
+        "BOMComponentDB", back_populates="formula", cascade="all, delete-orphan"
+    )
+
+
+class BOMComponentDB(Base):
+    """One direct child of an assembly's BOM (its recipe, a single level)."""
+    __tablename__ = "bom_component"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    assembly_item_id = Column(
+        BigInteger,
+        ForeignKey("bom_formula.assembly_item_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    component_item_id = Column(BigInteger, nullable=False)
+    component_sku = Column(String(255), nullable=False)
+    component_name = Column(String(512), nullable=True)
+    quantity = Column(Float, nullable=False)
+    unit = Column(String(32), nullable=True)
+    is_phantom = Column(Boolean, nullable=False, default=False)
+    is_manufacturing = Column(Boolean, nullable=False, default=False)
+    bom_id = Column(String(64), nullable=True)               # NetSuite BOM record id (kept for response parity)
+    ordinal = Column(Integer, nullable=False, default=0)
+
+    formula = relationship("BOMFormulaDB", back_populates="components")
+
+    __table_args__ = (
+        Index("ix_bom_component_assembly", "assembly_item_id"),
+    )
+
+
 class SessionDB(Base):
     __tablename__ = "sessions"
 

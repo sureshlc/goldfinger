@@ -210,7 +210,11 @@ class ProductionService:
         for iid in item_ids:
             key = cache_keys[iid]
             if key in cached_results:
-                hits.append(cached_results[key])
+                rec = cached_results[key]
+                # Real inventory rows carry item_sku; negative-cached (0 on-hand) entries don't —
+                # those count as cache HITS (so we don't re-query) but carry no row to return.
+                if "item_sku" in rec:
+                    hits.append(rec)
             else:
                 uncached_ids.append(iid)
 
@@ -222,12 +226,19 @@ class ProductionService:
         # Fetch only uncached IDs from NetSuite
         fresh = await self.inventory_service.get_inventory_levels(uncached_ids, location_name)
 
-        # Cache each new result individually
+        # Cache each new result individually. Also NEGATIVE-cache items that returned no row
+        # (0 on-hand, e.g. phantom sub-assemblies) so a pre-warmed batch stops them being
+        # re-queried per node — this is what collapses the N+1 inventory pattern.
         to_cache = {}
+        found_ids = set()
         for inv in fresh:
             inv_id = inv.get("item_id", "")
             if inv_id and inv_id in cache_keys:
                 to_cache[cache_keys[inv_id]] = inv
+                found_ids.add(inv_id)
+        for iid in uncached_ids:
+            if iid not in found_ids:
+                to_cache[cache_keys[iid]] = {"item_id": iid, "available_quantity": 0}
         if to_cache:
             await self.cache_manager.set_many(to_cache)
 
@@ -540,11 +551,9 @@ class ProductionService:
                 "location_name": location_name
             }
 
-        calc_start = time.time()
-        max_producible_quantity, shortages, component_totals, inventory_data, limiting_info = await self.get_max_producible_quantity_and_shortages(
-            item_id, desired_quantity, location_name, None
-        )
-
+        # Fetch the full BOM once (cached), then pre-warm inventory for EVERY component in a single
+        # batched query. get_max_producible's per-node inventory lookups then hit the per-item cache
+        # instead of firing a NetSuite query per level (kills the N+1 inventory pattern).
         bom_components = await self._get_bom(item_sku)
 
         if not bom_components:
@@ -560,6 +569,18 @@ class ProductionService:
                 "shortages": [],
                 "location_name": location_name
             }
+
+        inv_ids = {item_id}
+        for comp in bom_components:
+            iid = comp.get("internal_id")
+            if iid:
+                inv_ids.add(str(iid))
+        await self._get_inventory(list(inv_ids), location_name)
+
+        calc_start = time.time()
+        max_producible_quantity, shortages, component_totals, inventory_data, limiting_info = await self.get_max_producible_quantity_and_shortages(
+            item_id, desired_quantity, location_name, None
+        )
 
         for comp in bom_components:
             comp.setdefault("level", 0)
@@ -1351,6 +1372,17 @@ class ProductionService:
         await self.cache_manager.invalidate(make_bom_revision_cache_key(item_id))
 
         await self.cache_manager.invalidate_pattern(f"inventory:{item_id}")
+
+        # Also drop the persisted BOM formula so the next query re-fetches from NetSuite.
+        try:
+            from app.database.connection import get_session_factory
+            from app.database.repositories.bom_repo import delete_bom_formula
+            factory = get_session_factory()
+            async with factory() as session:
+                await delete_bom_formula(session, int(item_id))
+                await session.commit()
+        except Exception as e:
+            logger.warning(f"Failed to clear persisted BOM formula for item {item_id}: {e}")
 
         if item_sku:
             bom_key = make_bom_cache_key(item_sku)
