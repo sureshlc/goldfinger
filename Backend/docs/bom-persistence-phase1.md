@@ -126,8 +126,15 @@ Do **NOT** surface freshness in the user-facing API or UI. The only place it app
 
 ## 10. Cron (Phase 3) — job runner choice
 
-**pg-boss is Node/Postgres; this backend is Python/FastAPI, so pg-boss cannot run in-process here.**
-Options for the Saturday-morning refresh:
+**DECIDED & SHIPPED:** none of the HTTP options — a **standalone systemd timer** running the
+job in-process (`app/scripts/refresh_boms.py`) directly against DB+NetSuite. This drops the auth
+surface entirely (API keys are `role='service'` and can't reach the admin endpoint; we didn't want
+to weaken that). Cross-process safety vs. a manual admin run is handled by a Postgres advisory lock
+(`BOM_REFRESH_LOCK_KEY`) inside `refresh_all_bom_formulas()`. See `deploy/systemd/README.md`.
+L1 (1h TTL) trails the freshly-written L2 by ≤1h on its own, exactly as it already does hourly.
+
+Original options considered for the Saturday-morning refresh (pg-boss is Node/Postgres and can't
+run in-process in this Python/FastAPI backend):
 
 | Option | Notes |
 |---|---|

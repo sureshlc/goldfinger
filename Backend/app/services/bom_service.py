@@ -20,6 +20,12 @@ try:
 except ValueError:
     BOM_CACHE_MAX_AGE_DAYS = 14
 
+# Cross-process mutex for "refresh all formulas": the live app (admin button) and the
+# standalone weekly cron script run in different processes, so an in-memory guard can't
+# serialize them. A fixed-key Postgres session-level advisory lock does. Arbitrary but
+# stable 64-bit key; must not collide with any other advisory lock in this DB.
+BOM_REFRESH_LOCK_KEY = 4200079
+
 # Progress of a "refresh all formulas" run (admin trigger or weekly cron). Single run at a time.
 _refresh_status = {
     "running": False, "total": 0, "done": 0, "errors": 0,
@@ -217,47 +223,89 @@ class BOMService:
     async def refresh_all_bom_formulas(self, pace_seconds: float = 0.4) -> Dict:
         """Re-fetch every cached assembly's direct BOM, paced to respect NetSuite limits.
 
-        Reused by the manual admin trigger and the weekly cron. Progress is tracked in the
-        module-level _refresh_status (readable via get_bom_refresh_status)."""
+        Reused by the manual admin trigger and the weekly cron. Because those run in
+        DIFFERENT processes (live app vs. standalone cron script), the in-memory
+        _refresh_status guard can't prevent them colliding — so we take a Postgres
+        session-level advisory lock. Only one refresh proceeds regardless of trigger
+        source; a second concurrent trigger returns immediately as skipped.
+
+        Progress is tracked in the module-level _refresh_status (readable via
+        get_bom_refresh_status)."""
         from datetime import datetime, timezone
-        from app.database.connection import get_session_factory
+        from sqlalchemy import text
+        from app.database.connection import get_session_factory, get_engine
         from app.database.repositories.bom_repo import get_all_formula_ids
 
-        factory = get_session_factory()
-        async with factory() as session:
-            ids = await get_all_formula_ids(session)
-
-        start = time.time()
-        _refresh_status.update({
-            "running": True, "total": len(ids), "done": 0, "errors": 0,
-            "started_at": datetime.now(timezone.utc).isoformat(), "finished_at": None,
-        })
-        logger.info(f"[BOM-refresh] starting full refresh of {len(ids)} formulas")
-
-        refreshed, errors = 0, 0
+        # Dedicated connection held open for the whole run so the session-level
+        # advisory lock persists until we explicitly unlock (survives txn boundaries).
+        lock_conn = await get_engine().connect()
         try:
-            for i, iid in enumerate(ids):
-                try:
-                    await self.refresh_bom_formula(str(iid))
-                    refreshed += 1
-                except Exception as e:
-                    errors += 1
-                    logger.warning(f"[BOM-refresh] item {iid} failed: {e}")
-                _refresh_status.update({"done": i + 1, "errors": errors})
-                if pace_seconds:
-                    await asyncio.sleep(pace_seconds)
-        finally:
-            summary = {
-                "total": len(ids), "refreshed": refreshed, "errors": errors,
-                "seconds": round(time.time() - start, 1),
-            }
+            got_lock = (
+                await lock_conn.execute(
+                    text("SELECT pg_try_advisory_lock(:k)"),
+                    {"k": BOM_REFRESH_LOCK_KEY},
+                )
+            ).scalar()
+            # Commit so the connection sits plain-idle, NOT idle-in-transaction, for the
+            # multi-minute run. Session-level advisory locks survive the commit, so the
+            # mutex holds — but we're now immune to idle_in_transaction_session_timeout
+            # terminating the connection and silently releasing the lock.
+            await lock_conn.commit()
+            if not got_lock:
+                logger.warning(
+                    "[BOM-refresh] another refresh already holds the advisory lock; skipping"
+                )
+                skipped = {"skipped": True, "reason": "another refresh in progress"}
+                _refresh_status.update({
+                    "running": False,
+                    "finished_at": datetime.now(timezone.utc).isoformat(),
+                    "last_summary": skipped,
+                })
+                return skipped
+
+            factory = get_session_factory()
+            async with factory() as session:
+                ids = await get_all_formula_ids(session)
+
+            start = time.time()
             _refresh_status.update({
-                "running": False,
-                "finished_at": datetime.now(timezone.utc).isoformat(),
-                "last_summary": summary,
+                "running": True, "total": len(ids), "done": 0, "errors": 0,
+                "started_at": datetime.now(timezone.utc).isoformat(), "finished_at": None,
             })
-            logger.info(f"[BOM-refresh] done: {summary}")
-        return summary
+            logger.info(f"[BOM-refresh] starting full refresh of {len(ids)} formulas")
+
+            refreshed, errors = 0, 0
+            try:
+                for i, iid in enumerate(ids):
+                    try:
+                        await self.refresh_bom_formula(str(iid))
+                        refreshed += 1
+                    except Exception as e:
+                        errors += 1
+                        logger.warning(f"[BOM-refresh] item {iid} failed: {e}")
+                    _refresh_status.update({"done": i + 1, "errors": errors})
+                    if pace_seconds:
+                        await asyncio.sleep(pace_seconds)
+            finally:
+                summary = {
+                    "total": len(ids), "refreshed": refreshed, "errors": errors,
+                    "seconds": round(time.time() - start, 1),
+                }
+                _refresh_status.update({
+                    "running": False,
+                    "finished_at": datetime.now(timezone.utc).isoformat(),
+                    "last_summary": summary,
+                })
+                logger.info(f"[BOM-refresh] done: {summary}")
+            return summary
+        finally:
+            try:
+                await lock_conn.execute(
+                    text("SELECT pg_advisory_unlock(:k)"), {"k": BOM_REFRESH_LOCK_KEY}
+                )
+                await lock_conn.commit()
+            finally:
+                await lock_conn.close()
 
     async def _resolve_current_revision(self, item_id: str) -> Optional[str]:
         """Resolve an assembly item's masterDefault BOM -> current revision id via the REST record API.

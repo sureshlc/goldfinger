@@ -1,0 +1,29 @@
+[Unit]
+Description=Goldfinger weekly BOM formula refresh (NetSuite -> Postgres cache)
+Documentation=file:/opt/goldfinger/Backend/docs/bom-persistence-phase1.md
+# NetSuite + DB are remote; only start once the network is actually up.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+# pydantic BaseSettings reads .env relative to CWD, same as the API process — so no
+# EnvironmentFile / inline secrets needed; the app's own .env supplies DB + NetSuite creds.
+WorkingDirectory=/opt/goldfinger/Backend
+ExecStart=/opt/goldfinger/Backend/.venv/bin/python -m app.scripts.refresh_boms
+# The run is deliberately paced (~0.4s/item) to respect NetSuite rate limits, so it can take
+# a few minutes. Give it plenty of headroom; a Postgres advisory lock guards against overlap.
+TimeoutStartSec=1800
+# Least-privilege hardening (safe for this workload: reads .env, talks to DB+NetSuite over
+# the network, writes nothing to disk beyond a private /tmp).
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/goldfinger/Backend
+ProtectHome=true
+# Standalone process (not under PM2). Output goes to the journal:
+#   journalctl -u goldfinger-bom-refresh
+StandardOutput=journal
+StandardError=journal

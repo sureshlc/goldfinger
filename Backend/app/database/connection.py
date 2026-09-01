@@ -58,3 +58,10 @@ def get_session_factory():
     if _async_session_factory is None:
         raise RuntimeError("Database not initialized. Call init_db() first.")
     return _async_session_factory
+
+
+def get_engine():
+    """Get the async engine (e.g. for a dedicated connection holding an advisory lock)."""
+    if _engine is None:
+        raise RuntimeError("Database not initialized. Call init_db() first.")
+    return _engine
