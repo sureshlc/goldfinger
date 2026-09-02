@@ -251,6 +251,7 @@ class ProductionService:
         location_name: Optional[str] = None,
         bom_components: Optional[List[Dict]] = None,
         depth: int = 0,
+        item_meta: Optional[Dict] = None,
     ) -> Tuple[int, List[Dict], Dict[str, float], Dict[str, Dict], Optional[Dict]]:
         start_time = time.time()
         indent = "  " * depth
@@ -262,7 +263,15 @@ class ProductionService:
             return 0, [{"item_id": item_id, "reason": "Could not resolve item"}], {}, {}, None
         item_id = resolved_id
 
-        item_details = await self._get_item_details(item_id)
+        # On a sub-assembly recursion the parent already carries this node's metadata
+        # (is_manufacturing / name / sku, from the cached BOM component row), so reuse it
+        # instead of re-fetching the item master from NetSuite. These fields are only used
+        # as the manufacturing branch flag and display labels — never in the quantity math —
+        # so the feasibility result is identical.
+        if item_meta is not None:
+            item_details = item_meta
+        else:
+            item_details = await self._get_item_details(item_id)
         if not item_details:
             logger.warning(f"{indent}Item not found: {item_id}")
             return 0, [{"item_id": item_id, "reason": "Item not found"}], {}, {}, None
@@ -405,8 +414,17 @@ class ProductionService:
                 else:
                     adjusted_sub_components = []
 
+                # Reuse the metadata we already have for this manufacturing component so the
+                # recursive call skips a redundant get_item_details (item master) NetSuite hit.
+                # We only reach here when comp.is_manufacturing == "true" (see is_sub_multi_level).
+                sub_item_meta = {
+                    "is_manufacturing": "true",
+                    "itemid": comp_sku,
+                    "displayname": comp_name,
+                }
                 sub_max_qty, sub_shortages, sub_totals, sub_inventory, sub_limiting = await self.get_max_producible_quantity_and_shortages(
-                    comp_id, int(math.ceil(required_qty_total)), location_name, adjusted_sub_components, depth + 1
+                    comp_id, int(math.ceil(required_qty_total)), location_name, adjusted_sub_components, depth + 1,
+                    item_meta=sub_item_meta,
                 )
                 all_shortages.extend(sub_shortages)
 
