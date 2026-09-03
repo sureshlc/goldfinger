@@ -328,11 +328,19 @@ class ProductionService:
         limiting_component_info = None
         min_producible = float('inf')
 
-        component_skus = list({comp.get("component_sku", "") for comp in direct_components})
-        resolution_results = await asyncio.gather(
-            *(self._resolve_identifier(sku) for sku in component_skus)
-        )
-        resolved_ids = [rid for rid in resolution_results if rid]
+        # Component ids are already in the BOM rows (internal_id) — reuse them instead of
+        # re-resolving each component SKU against NetSuite (which fires a get_item_details per
+        # unique SKU). These are the exact ids the recipe lists, so they stay aligned with the
+        # inventory pre-batch and are faithful for duplicate SKUs. Fall back to SKU resolution
+        # only for the rare row that somehow lacks an internal_id.
+        resolved_ids = []
+        for comp in direct_components:
+            iid = comp.get("internal_id")
+            if not iid:
+                iid = await self._resolve_identifier(comp.get("component_sku", ""))
+            if iid:
+                resolved_ids.append(str(iid))
+        resolved_ids = list(dict.fromkeys(resolved_ids))  # dedup, preserve order
 
         component_inventory_levels = await self._get_inventory(resolved_ids, location_name)
 
@@ -352,7 +360,10 @@ class ProductionService:
             unit = comp.get("unit")
             required_qty_per_unit = float(comp.get("quantity_required", 0))
             required_qty_total = required_qty_per_unit * desired_quantity
-            comp_id = sku_to_id.get(comp_sku) or await self._resolve_identifier(comp_sku)
+            # Prefer the id the BOM already carries (dup-SKU faithful, matches the inventory
+            # pre-batch keys); only re-resolve if a row lacks it.
+            comp_id = (str(comp["internal_id"]) if comp.get("internal_id") else None) \
+                or sku_to_id.get(comp_sku) or await self._resolve_identifier(comp_sku)
 
             if not comp_id:
                 logger.warning(f"{indent}Could not resolve component SKU: {comp_sku}")
