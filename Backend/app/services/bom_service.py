@@ -274,16 +274,43 @@ class BOMService:
             })
             logger.info(f"[BOM-refresh] starting full refresh of {len(ids)} formulas")
 
-            refreshed, errors = 0, 0
+            # Batched (Lever 1): resolve each group of assemblies' legacy BOMs in ONE SuiteQL
+            # (parent_item.id IN (...)) instead of one call per assembly. Legacy hits are written
+            # directly; assemblies with no legacy rows (native / no-BOM) OR a whole-batch failure
+            # fall back to the vetted per-item refresh_bom_formula, so coverage never regresses.
+            refreshed, errors, done = 0, 0, 0
+            BATCH_SIZE = 50
             try:
-                for i, iid in enumerate(ids):
+                for start_idx in range(0, len(ids), BATCH_SIZE):
+                    batch = [str(x) for x in ids[start_idx:start_idx + BATCH_SIZE]]
                     try:
-                        await self.refresh_bom_formula(str(iid))
-                        refreshed += 1
+                        legacy_map = await self._get_item_boms_legacy_batch(batch)
+                        batch_ok = True
                     except Exception as e:
-                        errors += 1
-                        logger.warning(f"[BOM-refresh] item {iid} failed: {e}")
-                    _refresh_status.update({"done": i + 1, "errors": errors})
+                        logger.warning(
+                            f"[BOM-refresh] batch legacy query failed for {len(batch)} items: {e}; "
+                            f"falling back to per-item"
+                        )
+                        legacy_map, batch_ok = {}, False
+
+                    for iid in batch:
+                        try:
+                            if batch_ok and iid in legacy_map:
+                                entry = legacy_map[iid]
+                                await self._write_bom_to_db(iid, entry["components"], "legacy", None, True)
+                                await self._invalidate_bom_in_memory(iid, entry.get("parent_sku"))
+                            else:
+                                # native / no-BOM, or the batch query failed: vetted per-item path
+                                # (it re-checks legacy, then native, and raises on NetSuite error so
+                                # a good cached formula is never clobbered).
+                                await self.refresh_bom_formula(iid)
+                            refreshed += 1
+                        except Exception as e:
+                            errors += 1
+                            logger.warning(f"[BOM-refresh] item {iid} failed: {e}")
+                        done += 1
+
+                    _refresh_status.update({"done": done, "errors": errors})
                     if pace_seconds:
                         await asyncio.sleep(pace_seconds)
             finally:
@@ -440,6 +467,75 @@ class BOMService:
         except Exception as e:
             logger.error(f"Failed to fetch legacy BOM for item {item_id}: {e}")
             raise
+
+    async def _get_item_boms_legacy_batch(self, item_ids: List[str]) -> Dict[str, Dict]:
+        """Batched legacy BOM resolution: ONE SuiteQL for many assemblies via parent_item.id IN (...).
+
+        Same rows as _get_item_bom_legacy, grouped by parent. Returns
+        {assembly_item_id: {"parent_sku": <sku>, "components": [<component dicts>]}}. Assemblies with
+        no legacy rows are simply absent from the map (caller falls back to native per-item). Also
+        carries parent_sku so callers can invalidate the in-memory BOM cache without a per-item
+        get_item_details lookup. Raises on NetSuite error (caller must not clobber the cache).
+        """
+        if not item_ids:
+            return {}
+        for iid in item_ids:
+            validate_numeric_id(iid, "item_id")
+        id_list = ",".join(f"'{iid}'" for iid in item_ids)
+
+        sql = f"""
+        SELECT
+            parent_item.id AS parent_id,
+            parent_item.itemid AS parent_sku,
+            b.id AS bom_id,
+            b.name AS bom_name,
+            item.id as internal_id,
+            item.itemid as component_sku,
+            (CASE WHEN item.displayname IS NULL THEN item.description ELSE item.displayname END) AS component_displayname,
+            item.displayname,
+            item.description AS component_name,
+            ROUND(component.quantity, 5) as quantity_required,
+            COALESCE(iu.name, BUILTIN.DF(component.units)) as unit,
+            CASE WHEN item.itemtype IN ('Assembly', 'Kit') THEN 'true' ELSE 'false' END as is_manufacturing,
+            CASE WHEN item.isphantom = 'T' THEN 'true' ELSE 'false' END as is_phantom
+        FROM bomRevisionComponentMember AS component
+        JOIN bomRevision AS rev ON component.bomRevision = rev.id
+        JOIN bom as b ON rev.billofmaterials = b.id
+        JOIN item ON component.item = item.id
+        JOIN item parent_item ON b.custrecord_blend_bom_assembly = parent_item.id
+        LEFT JOIN ItemUnit as iu ON component.units = iu.key
+        WHERE parent_item.id IN ({id_list})
+        AND item.id != 5837
+        AND rev.isInactive = 'F'
+        AND (rev.effectiveenddate IS NULL OR rev.effectiveenddate >= CURRENT_DATE)
+        AND (rev.effectivestartdate IS NULL OR rev.effectivestartdate <= CURRENT_DATE)
+        ORDER BY parent_item.id, b.id, item.id, component.quantity
+        """
+        start_time = time.time()
+        result = await self.netsuite_service.execute_suiteql(sql)
+        rows = result.get('items', [])
+        grouped: Dict[str, Dict] = {}
+        for row in rows:
+            pid = str(row.pop("parent_id", "") or "")
+            psku = row.pop("parent_sku", "") or ""
+            if not pid:
+                continue
+            entry = grouped.setdefault(pid, {"parent_sku": psku, "components": []})
+            entry["components"].append(row)
+        elapsed = time.time() - start_time
+        logger.info(
+            f"[TIMING] _get_item_boms_legacy_batch for {len(item_ids)} assemblies took {elapsed:.3f}s, "
+            f"{len(grouped)} had legacy BOMs, {len(rows)} rows"
+        )
+        return grouped
+
+    async def _invalidate_bom_in_memory(self, item_id: str, sku: Optional[str]) -> None:
+        """Drop the in-memory BOM layers for an item using an already-known SKU (no NetSuite call)."""
+        if not self.cache_manager:
+            return
+        await self.cache_manager.invalidate(make_bom_revision_cache_key(item_id))
+        if sku:
+            await self.cache_manager.invalidate(make_bom_cache_key(sku))
 
     async def get_item_details(self, item_id: str) -> Optional[Dict]:
         """Get detailed information for a specific item by ID. Uses cache if available."""
