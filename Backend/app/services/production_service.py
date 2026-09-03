@@ -110,8 +110,10 @@ class ProductionService:
     async def _get_item_details(self, item_id: str) -> Optional[Dict]:
         return await self.bom_service.get_item_details(item_id)
 
-    async def _get_bom(self, item_sku: str) -> List[Dict]:
-        return await self.bom_service.get_full_bom(item_sku)
+    async def _get_bom(self, item_sku: str, item_id: Optional[str] = None) -> List[Dict]:
+        # item_id, when passed, lets get_full_bom skip its own get_item_id_by_sku
+        # (SKU->id) NetSuite lookup — we already resolved it upstream.
+        return await self.bom_service.get_full_bom(item_sku, item_id=item_id)
 
     @staticmethod
     def _build_bom_tree(bom_components: List[Dict]) -> List[Dict]:
@@ -572,7 +574,15 @@ class ProductionService:
         # Fetch the full BOM once (cached), then pre-warm inventory for EVERY component in a single
         # batched query. get_max_producible's per-node inventory lookups then hit the per-item cache
         # instead of firing a NetSuite query per level (kills the N+1 inventory pattern).
-        bom_components = await self._get_bom(item_sku)
+        #
+        # Consolidation: we already resolved the internal id in Phase 1, so pass it into get_full_bom
+        # to skip its redundant get_item_id_by_sku (SKU->id) re-resolution. Guarded to Assembly items
+        # only: an Assembly is get_item_id_by_sku's top preference (ORDER BY Assembly first), so for a
+        # duplicate SKU (Assembly + InvtPart) this is the exact id it would have picked. Reaching here
+        # already implies is_manufacturing, so the item is an Assembly/Kit; any non-Assembly type falls
+        # back to the SKU re-resolution — unchanged behavior, never a wrong id.
+        bom_root_id = item_id if item_details.get("itemtype") == "Assembly" else None
+        bom_components = await self._get_bom(item_sku, item_id=bom_root_id)
 
         if not bom_components:
             return {
@@ -773,7 +783,10 @@ class ProductionService:
         for entry in valid_entries:
             idx, rid, desired_qty, orig_sku, details, item_sku_val, is_mfg = entry
             if is_mfg:
-                bom_tasks.append(self._get_bom(item_sku_val))
+                # Same consolidation as the single-SKU path: reuse the id we already resolved,
+                # guarded to Assembly items so a duplicate SKU still lands on the Assembly.
+                bom_root_id = rid if details.get("itemtype") == "Assembly" else None
+                bom_tasks.append(self._get_bom(item_sku_val, item_id=bom_root_id))
                 bom_indices.append(len(sku_meta))  # position where this will be inserted
             sku_meta.append({
                 "sku": orig_sku, "desired_qty": desired_qty,
