@@ -18,6 +18,14 @@ async def get_item_by_id(db: AsyncSession, item_id: int) -> Optional[ItemDB]:
     return result.scalar_one_or_none()
 
 
+async def get_items_by_skus(db: AsyncSession, skus: List[str]) -> List[ItemDB]:
+    """Bulk SKU lookup for batch endpoints: one query, WHERE sku IN (...)."""
+    if not skus:
+        return []
+    result = await db.execute(select(ItemDB).where(ItemDB.sku.in_(skus)))
+    return list(result.scalars().all())
+
+
 async def upsert_item(db: AsyncSession, item_id: int, sku: str, name: str = None) -> ItemDB:
     # Check if SKU already exists with a different ID
     existing = await get_item_by_sku(db, sku)

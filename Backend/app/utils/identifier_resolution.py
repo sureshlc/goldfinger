@@ -1,7 +1,7 @@
 """
 Multi-tiered identifier resolution (SKU or ID).
 """
-from typing import Optional
+from typing import Optional, List, Dict
 import logging
 from app.utils.local_sku_resolver import get_local_resolver
 
@@ -93,3 +93,44 @@ async def resolve_sku_or_id(identifier: str, bom_service) -> Optional[str]:
         await local_resolver.save_item(netsuite_id, identifier, item_name)
 
     return netsuite_id
+
+
+async def resolve_skus_bulk(skus: List[str], bom_service) -> Dict[str, Dict]:
+    """Resolve many SKUs to {id, name} in ONE items-table query (WHERE sku IN (...)), with a
+    NetSuite fallback only for SKUs absent from the local table.
+
+    Throughput-oriented for batch endpoints: unlike resolve_sku_or_id it does NOT verify each
+    mapping against NetSuite per-SKU (which would be one call each) — the local items table is the
+    SKU->id source of truth. Returns {sku: {"id": <str|None>, "name": <str>}}.
+    """
+    from app.database.connection import get_session_factory
+    from app.database.repositories.item_repo import get_items_by_skus
+
+    # Dedup + strip, preserve order.
+    clean = list(dict.fromkeys(s.strip() for s in skus if s and s.strip()))
+    if not clean:
+        return {}
+
+    resolved: Dict[str, Dict] = {}
+    factory = get_session_factory()
+    async with factory() as session:
+        rows = await get_items_by_skus(session, clean)
+    by_sku = {str(r.sku): {"id": str(r.id), "name": r.name or ""} for r in rows}
+
+    misses = []
+    for sku in clean:
+        if sku in by_sku:
+            resolved[sku] = by_sku[sku]
+        else:
+            misses.append(sku)
+
+    # NetSuite fallback for untabled SKUs (rare). One get_item_id_by_sku each — not verified further.
+    for sku in misses:
+        try:
+            nid = await bom_service.get_item_id_by_sku(sku)
+        except Exception as e:
+            logger.warning(f"Bulk resolve NetSuite fallback failed for {sku}: {e}")
+            nid = None
+        resolved[sku] = {"id": nid, "name": ""}
+
+    return resolved
