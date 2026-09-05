@@ -582,6 +582,53 @@ class BOMService:
             logger.error(f"Failed to get item details for item ID {item_id}: {e}")
             return None
 
+    async def get_item_details_bulk(self, item_ids: List[str]) -> Dict[str, Dict]:
+        """Fetch details for many item ids in ONE SuiteQL (WHERE id IN (...)) and populate the
+        in-memory item-details cache. Same row shape as get_item_details, so a later per-id
+        get_item_details(id) is a cache hit. Only cache-misses are queried; returns {id: details}.
+        """
+        out: Dict[str, Dict] = {}
+        misses: List[str] = []
+        for iid in item_ids:
+            iid = str(iid)
+            if self.cache_manager:
+                cached = await self.cache_manager.get(make_item_details_cache_key(iid))
+                if cached is not None:
+                    out[iid] = cached
+                    continue
+            misses.append(iid)
+
+        # Dedup misses, preserve order.
+        misses = list(dict.fromkeys(misses))
+        if not misses:
+            return out
+
+        for iid in misses:
+            validate_numeric_id(iid, "item_id")
+        id_list = ",".join(f"'{i}'" for i in misses)
+        sql = f"""
+        SELECT
+            id,
+            itemid,
+            COALESCE(description, itemid) as displayname,
+            itemtype,
+            description,
+            CASE WHEN itemtype IN ('Assembly', 'Kit') THEN 'true' ELSE 'false' END as is_manufacturing
+        FROM item
+        WHERE id IN ({id_list})
+        AND isinactive = 'F'
+        """
+        start_time = time.time()
+        result = await self.netsuite_service.execute_suiteql(sql)
+        rows = result.get('items', [])
+        logger.info(f"[TIMING] get_item_details_bulk for {len(misses)} ids took {time.time() - start_time:.3f}s, {len(rows)} rows")
+        for row in rows:
+            rid = str(row.get("id"))
+            out[rid] = row
+            if self.cache_manager:
+                await self.cache_manager.set(make_item_details_cache_key(rid), row)
+        return out
+
     async def get_full_bom(self, item_sku: str, max_depth=5, current_depth=0, item_id: Optional[str] = None) -> List[Dict]:
         """Recursively fetch the full multi-level BOM for an item by SKU, up to max_depth levels.
 

@@ -759,10 +759,16 @@ class ProductionService:
         # ------------------------------------------------------------------
         sku_meta: List[Dict] = []  # [{sku, desired_qty, item_id, item_name, item_sku, bom, direct_components}]
 
-        resolve_tasks = [self._resolve_identifier(sku) for sku, _ in items]
-        resolved_ids = await asyncio.gather(*resolve_tasks)
+        # Bulk-resolve all SKUs in ONE items-table query (no per-SKU NetSuite verify), then pre-warm
+        # item details for all resolved ids in ONE SuiteQL. This replaces the old per-SKU
+        # _resolve_identifier + _get_item_details (which cost ~1 NetSuite call per SKU) with 2 calls
+        # total regardless of batch size. The per-id _get_item_details calls below then hit cache.
+        from app.utils.identifier_resolution import resolve_skus_bulk
+        bulk_resolved = await resolve_skus_bulk([sku for sku, _ in items], self.bom_service)
+        resolved_ids = [bulk_resolved.get(sku, {}).get("id") for sku, _ in items]
+        await self.bom_service.get_item_details_bulk([r for r in resolved_ids if r])
 
-        # Fetch item details in parallel for all resolved IDs
+        # Fetch item details in parallel for all resolved IDs (now served from the pre-warmed cache)
         detail_tasks = []
         for idx, (sku, desired_qty) in enumerate(items):
             rid = resolved_ids[idx]
