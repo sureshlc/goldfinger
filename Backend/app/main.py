@@ -2,7 +2,10 @@
 Main FastAPI Application with PostgreSQL + Integrated Logging System
 """
 import asyncio
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI, Depends, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from app.config import settings, validate_settings
@@ -164,6 +167,26 @@ app.add_middleware(SecurityHeadersMiddleware)
 
 # Add Request Logging middleware
 app.add_middleware(RequestLoggingMiddleware)
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """Record WHY a 422 happened so it's visible in the audit trail.
+
+    Stashes a compact summary of the validation errors on request.state so the logging
+    middleware can persist it into request_logs.error_message. The response body is the
+    SAME shape FastAPI returns by default, so partners see no change in behaviour.
+    """
+    errors = exc.errors()
+    # Compact, PII-light summary: "<field path>: <message>" per error, first few only.
+    summary = "; ".join(
+        f"{'.'.join(str(p) for p in e.get('loc', []))}: {e.get('msg', '')}"
+        for e in errors[:5]
+    )
+    if len(errors) > 5:
+        summary += f" (+{len(errors) - 5} more)"
+    request.state.validation_error = summary
+    return JSONResponse(status_code=422, content={"detail": jsonable_encoder(errors)})
 
 # Include routers
 try:

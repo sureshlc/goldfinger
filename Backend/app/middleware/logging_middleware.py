@@ -77,6 +77,10 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             # Check if response indicates an error
             if status_code >= 400:
                 error_type = self._get_error_type(status_code)
+                # 422s are caught by FastAPI's validation handler (never reach the except
+                # below), so pull the detail it stashed on request.state so we log WHY.
+                if status_code == 422:
+                    error_message = getattr(request.state, "validation_error", None) or error_message
                 
         except Exception as e:
             # Capture exception details
