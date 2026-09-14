@@ -124,13 +124,15 @@ async def resolve_skus_bulk(skus: List[str], bom_service) -> Dict[str, Dict]:
         else:
             misses.append(sku)
 
-    # NetSuite fallback for untabled SKUs (rare). One get_item_id_by_sku each — not verified further.
-    for sku in misses:
+    # NetSuite fallback for untabled SKUs (rare) — ONE bulk itemid IN (...) query for the whole set,
+    # not one call per SKU. Not verified further.
+    if misses:
         try:
-            nid = await bom_service.get_item_id_by_sku(sku)
+            netsuite_ids = await bom_service.get_item_ids_by_skus_bulk(misses)
         except Exception as e:
-            logger.warning(f"Bulk resolve NetSuite fallback failed for {sku}: {e}")
-            nid = None
-        resolved[sku] = {"id": nid, "name": ""}
+            logger.warning(f"Bulk resolve NetSuite fallback failed for {len(misses)} skus: {e}")
+            netsuite_ids = {}
+        for sku in misses:
+            resolved[sku] = {"id": netsuite_ids.get(sku), "name": ""}
 
     return resolved

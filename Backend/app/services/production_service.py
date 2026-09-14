@@ -254,16 +254,20 @@ class ProductionService:
         bom_components: Optional[List[Dict]] = None,
         depth: int = 0,
         item_meta: Optional[Dict] = None,
+        prefetched_inventory: Optional[List[Dict]] = None,
     ) -> Tuple[int, List[Dict], Dict[str, float], Dict[str, Dict], Optional[Dict]]:
         start_time = time.time()
         indent = "  " * depth
         logger.info(f"{indent}[TIMING] get_max_producible called for item {item_id}, qty {desired_quantity}, depth {depth}")
 
-        resolved_id = await self._resolve_identifier(item_id)
-        if not resolved_id:
-            logger.warning(f"{indent}Could not resolve item identifier: {item_id}")
-            return 0, [{"item_id": item_id, "reason": "Could not resolve item"}], {}, {}, None
-        item_id = resolved_id
+        # When metadata is supplied the caller already resolved this id — skip re-resolution, which
+        # would fire a get_item_details verify on a cold cache.
+        if item_meta is None:
+            resolved_id = await self._resolve_identifier(item_id)
+            if not resolved_id:
+                logger.warning(f"{indent}Could not resolve item identifier: {item_id}")
+                return 0, [{"item_id": item_id, "reason": "Could not resolve item"}], {}, {}, None
+            item_id = resolved_id
 
         # On a sub-assembly recursion the parent already carries this node's metadata
         # (is_manufacturing / name / sku, from the cached BOM component row), so reuse it
@@ -289,6 +293,9 @@ class ProductionService:
             bom_task = self._get_bom(item_sku)
             inventory_levels, bom_components = await asyncio.gather(inventory_task, bom_task)
             logger.info(f"{indent}BOM fetch returned {len(bom_components)} components")
+        elif prefetched_inventory is not None:
+            # Reuse the caller's batched inventory instead of re-querying this item.
+            inventory_levels = [e for e in prefetched_inventory if str(e.get("item_id")) == str(item_id)]
         else:
             inventory_levels = await self._get_inventory([item_id], location_name)
 
@@ -342,7 +349,12 @@ class ProductionService:
                 resolved_ids.append(str(iid))
         resolved_ids = list(dict.fromkeys(resolved_ids))  # dedup, preserve order
 
-        component_inventory_levels = await self._get_inventory(resolved_ids, location_name)
+        if prefetched_inventory is not None:
+            # Reuse the caller's batched inventory (it already covers this item + all components).
+            rid_set = {str(r) for r in resolved_ids}
+            component_inventory_levels = [e for e in prefetched_inventory if str(e.get("item_id")) in rid_set]
+        else:
+            component_inventory_levels = await self._get_inventory(resolved_ids, location_name)
 
         inventory_lookup_by_sku = {inv["item_sku"]: inv for inv in component_inventory_levels}
         inventory_lookup_by_id = {inv["item_id"]: inv for inv in component_inventory_levels if "item_id" in inv}
@@ -427,21 +439,24 @@ class ProductionService:
                 else:
                     adjusted_sub_components = []
 
-                # Reuse the metadata we already have for this manufacturing component so the
-                # recursive call skips a redundant get_item_details (item master) NetSuite hit.
-                # We only reach here when comp.is_manufacturing == "true" (see is_sub_multi_level).
-                sub_item_meta = {
-                    "is_manufacturing": "true",
-                    "itemid": comp_sku,
-                    "displayname": comp_name,
-                }
-                sub_max_qty, sub_shortages, sub_totals, sub_inventory, sub_limiting = await self.get_max_producible_quantity_and_shortages(
-                    comp_id, int(math.ceil(required_qty_total)), location_name, adjusted_sub_components, depth + 1,
-                    item_meta=sub_item_meta,
-                )
-                all_shortages.extend(sub_shortages)
-
-                inventory_data.update(sub_inventory)
+                # Flat BOMs carry no child rows for a manufactured component, so treat it as a
+                # stocked leaf (its own inventory, already in the batched lookup) and skip the
+                # recursion. Only explode it when the BOM actually nests sub-components (the legacy
+                # multi-level fallback), reusing the metadata we already have to avoid a re-read.
+                if adjusted_sub_components:
+                    sub_item_meta = {
+                        "is_manufacturing": "true",
+                        "itemid": comp_sku,
+                        "displayname": comp_name,
+                    }
+                    sub_max_qty, sub_shortages, sub_totals, sub_inventory, sub_limiting = await self.get_max_producible_quantity_and_shortages(
+                        comp_id, int(math.ceil(required_qty_total)), location_name, adjusted_sub_components, depth + 1,
+                        item_meta=sub_item_meta,
+                    )
+                    all_shortages.extend(sub_shortages)
+                    inventory_data.update(sub_inventory)
+                else:
+                    sub_max_qty, sub_limiting = 0, None
 
                 component_inv_qty = float(inventory_lookup_by_id.get(comp_id, {}).get("available_quantity", 0))
                 total_units = component_inv_qty + sub_max_qty
@@ -548,7 +563,14 @@ class ProductionService:
         logger.info(f"=== [TIMING] Starting production analysis for item {item_identifier}, quantity {desired_quantity} ===")
 
         resolution_start = time.time()
-        resolved_id = await self._resolve_identifier(item_identifier)
+        # Resolve via the local items table (no per-SKU NetSuite verify — the item-details fetch
+        # below is the single source of truth). Fall back to the full resolver only on a miss
+        # (raw internal id, or a SKU absent from the local table).
+        from app.utils.identifier_resolution import resolve_skus_bulk
+        bulk_resolved = await resolve_skus_bulk([item_identifier], self.bom_service)
+        resolved_id = bulk_resolved.get(item_identifier, {}).get("id")
+        if not resolved_id:
+            resolved_id = await self._resolve_identifier(item_identifier)
         logger.info(f"[TIMING] SKU resolution took {time.time() - resolution_start:.3f}s")
 
         if not resolved_id:
@@ -614,11 +636,14 @@ class ProductionService:
             iid = comp.get("internal_id")
             if iid:
                 inv_ids.add(str(iid))
-        await self._get_inventory(list(inv_ids), location_name)
+        prewarmed_inventory = await self._get_inventory(list(inv_ids), location_name)
 
         calc_start = time.time()
+        # Reuse everything we already fetched — BOM, item metadata, and the batched inventory above —
+        # so the calculator makes NO further NetSuite queries for this item.
         max_producible_quantity, shortages, component_totals, inventory_data, limiting_info = await self.get_max_producible_quantity_and_shortages(
-            item_id, desired_quantity, location_name, None
+            item_id, desired_quantity, location_name, bom_components,
+            item_meta=item_details, prefetched_inventory=prewarmed_inventory,
         )
 
         for comp in bom_components:
@@ -759,29 +784,26 @@ class ProductionService:
         # ------------------------------------------------------------------
         sku_meta: List[Dict] = []  # [{sku, desired_qty, item_id, item_name, item_sku, bom, direct_components}]
 
-        # Bulk-resolve all SKUs in ONE items-table query (no per-SKU NetSuite verify), then pre-warm
-        # item details for all resolved ids in ONE SuiteQL. This replaces the old per-SKU
-        # _resolve_identifier + _get_item_details (which cost ~1 NetSuite call per SKU) with 2 calls
-        # total regardless of batch size. The per-id _get_item_details calls below then hit cache.
+        # Bulk-resolve all SKUs in ONE items-table query (no per-SKU NetSuite verify), then fetch
+        # item details for all resolved ids in ONE SuiteQL. Two calls total regardless of batch size.
         from app.utils.identifier_resolution import resolve_skus_bulk
         bulk_resolved = await resolve_skus_bulk([sku for sku, _ in items], self.bom_service)
         resolved_ids = [bulk_resolved.get(sku, {}).get("id") for sku, _ in items]
-        await self.bom_service.get_item_details_bulk([r for r in resolved_ids if r])
+        details_by_id = await self.bom_service.get_item_details_bulk([r for r in resolved_ids if r])
 
-        # Fetch item details in parallel for all resolved IDs (now served from the pre-warmed cache)
+        # Use the bulk result directly (Lever 3): the query above already returned every resolved
+        # id's details, so re-reading each id would only repeat that work (cache hits in warm prod,
+        # redundant NetSuite calls on a cold cache).
         detail_tasks = []
         for idx, (sku, desired_qty) in enumerate(items):
             rid = resolved_ids[idx]
             if rid:
                 detail_tasks.append((idx, rid, desired_qty, sku))
 
-        item_details_results = await asyncio.gather(
-            *(self._get_item_details(rid) for _, rid, _, _ in detail_tasks)
-        )
-
         # Pair details back, fetch BOMs in parallel
         valid_entries = []
-        for (idx, rid, desired_qty, orig_sku), details in zip(detail_tasks, item_details_results):
+        for (idx, rid, desired_qty, orig_sku) in detail_tasks:
+            details = details_by_id.get(str(rid))
             if not details:
                 logger.warning(f"[BATCH] Could not find item details for {orig_sku} (resolved: {rid})")
                 sku_meta.append({
@@ -794,16 +816,18 @@ class ProductionService:
             is_mfg = details.get("is_manufacturing") == "true"
             valid_entries.append((idx, rid, desired_qty, orig_sku, details, item_sku_val, is_mfg))
 
-        # Fetch BOMs for manufacturing items in parallel
-        bom_tasks = []
+        # Resolve BOMs for manufacturing items. Lever 1: instead of one get_full_bom NetSuite query
+        # per top-level assembly (gathered), batch all top levels into ONE native SuiteQL via
+        # get_full_boms_batch; only sub-assemblies recurse. Aligned to bom_roots order.
+        bom_roots = []
         bom_indices = []
         for entry in valid_entries:
             idx, rid, desired_qty, orig_sku, details, item_sku_val, is_mfg = entry
             if is_mfg:
-                # Same consolidation as the single-SKU path: reuse the id we already resolved,
-                # guarded to Assembly items so a duplicate SKU still lands on the Assembly.
+                # Reuse the id we already resolved, guarded to Assembly items so a duplicate SKU
+                # still lands on the Assembly (a non-Assembly falls back to per-root resolution).
                 bom_root_id = rid if details.get("itemtype") == "Assembly" else None
-                bom_tasks.append(self._get_bom(item_sku_val, item_id=bom_root_id))
+                bom_roots.append((item_sku_val, bom_root_id))
                 bom_indices.append(len(sku_meta))  # position where this will be inserted
             sku_meta.append({
                 "sku": orig_sku, "desired_qty": desired_qty,
@@ -824,7 +848,7 @@ class ProductionService:
                     "bom": [], "direct_components": [], "is_manufacturing": False,
                 })
 
-        bom_results = await asyncio.gather(*bom_tasks) if bom_tasks else []
+        bom_results = await self.bom_service.get_full_boms_batch(bom_roots) if bom_roots else []
         for bi, bom in zip(bom_indices, bom_results):
             sku_meta[bi]["bom"] = bom
             sku_meta[bi]["direct_components"] = [c for c in bom if c.get("level") == 0]
@@ -849,14 +873,15 @@ class ProductionService:
                 if comp_sku:
                     all_component_skus.add(comp_sku)
 
-        # Resolve component SKUs → internal IDs
+        # Resolve component SKUs → internal IDs in ONE bulk items-table query (WHERE sku IN (...))
+        # instead of a per-SKU _resolve_identifier gather. Local table is the source of truth; only
+        # SKUs absent from it hit NetSuite (one lookup each), so a cold batch stops re-querying.
         comp_sku_list = list(all_component_skus)
-        comp_resolve_results = await asyncio.gather(
-            *(self._resolve_identifier(s) for s in comp_sku_list)
-        )
+        comp_bulk = await resolve_skus_bulk(comp_sku_list, self.bom_service)
         comp_sku_to_id: Dict[str, str] = {}
         resolved_comp_ids: List[str] = []
-        for sku, rid in zip(comp_sku_list, comp_resolve_results):
+        for sku in comp_sku_list:
+            rid = comp_bulk.get(sku, {}).get("id")
             if rid:
                 comp_sku_to_id[sku] = rid
                 resolved_comp_ids.append(rid)

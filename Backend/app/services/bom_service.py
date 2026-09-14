@@ -83,51 +83,101 @@ class BOMService:
             logger.error(f"Failed to get internal ID for SKU {item_sku}: {e}")
             return None
 
-    async def get_item_bom(self, item_id: str) -> List[Dict]:
-        """Fetch an assembly's direct BOM components. Read-through: Postgres cache -> NetSuite.
+    async def get_item_ids_by_skus_bulk(self, item_skus: List[str]) -> Dict[str, str]:
+        """Resolve many SKUs -> internal id in ONE SuiteQL (WHERE itemid IN (...)).
 
-        Lookup order: persisted bom_formula/bom_component cache (no NetSuite) -> NetSuite resolution
-        (legacy-first, native fallback) which is then written back to the cache. Callers and the
-        full-tree recursion are unchanged; each level is just served from the DB on a cache hit.
+        Bulk twin of get_item_id_by_sku with the same Assembly-preference: a SKU shared by an
+        Assembly and an InvtPart resolves to the Assembly (the one that carries a BOM). Returns
+        {sku: id} for SKUs that exist; unknown SKUs are simply absent. Used as the resolve_skus_bulk
+        NetSuite fallback so a cold batch of brand-new SKUs resolves in one call, not one per SKU.
+        """
+        if not item_skus:
+            return {}
+        safe = []
+        for sku in item_skus:
+            validate_suiteql_identifier(sku, "item_sku")
+            safe.append(sanitize_suiteql_value(sku))
+        sku_list = ",".join(f"'{s}'" for s in safe)
+
+        # ORDER BY itemid then Assembly-first so the first row per SKU is the preferred (Assembly) id.
+        sql = f"""
+        SELECT id, itemid, itemtype
+        FROM item
+        WHERE itemid IN ({sku_list})
+        AND isinactive = 'F'
+        ORDER BY itemid, CASE WHEN itemtype = 'Assembly' THEN 0 ELSE 1 END, id
+        """
+        start_time = time.time()
+        result = await self.netsuite_service.execute_suiteql(sql)
+        rows = result.get('items', [])
+        out: Dict[str, str] = {}
+        for row in rows:
+            sku = str(row.get("itemid"))
+            if sku not in out:  # first per SKU wins (Assembly-preferred via ORDER BY)
+                out[sku] = str(row.get("id"))
+        logger.info(
+            f"[TIMING] get_item_ids_by_skus_bulk for {len(item_skus)} skus took "
+            f"{time.time() - start_time:.3f}s, {len(out)} resolved"
+        )
+        return out
+
+    async def get_item_bom(self, item_id: str) -> List[Dict]:
+        """Fetch an assembly's direct BOM components (see _get_item_bom_with_source; source dropped)."""
+        components, _ = await self._get_item_bom_with_source(item_id)
+        return components
+
+    async def _get_item_bom_with_source(self, item_id: str):
+        """Fetch an assembly's direct BOM components AND its source ('native' | 'legacy' | ...).
+
+        Read-through: persisted bom_formula/bom_component cache (no NetSuite) -> NetSuite resolution
+        (native-first, legacy fallback) which is then written back to the cache. The source lets the
+        full-tree walk pick per node: native BOMs are flat (stocked-leaf sub-assemblies), legacy
+        BOMs expand multi-level as before. Returns (components, source).
         """
         validate_numeric_id(item_id, "item_id")
 
         # L2: persisted formula cache (no NetSuite call on a hit).
         cached = await self._read_bom_from_db(item_id)
         if cached is not None:
-            return cached
+            return cached  # (components, source)
 
         # L3: resolve from NetSuite, then write back to the cache — but only if resolution
         # succeeded. A NetSuite error (e.g. 429) must NOT overwrite a good cached formula.
         components, source, revision_id, has_bom, ok = await self._resolve_bom_from_netsuite(item_id)
         if ok:
             await self._write_bom_to_db(item_id, components, source, revision_id, has_bom)
-            return components
+            return components, source
 
         # Resolution failed — fall back to a stale cached formula if we have one, else empty.
         stale = await self._read_bom_from_db(item_id, allow_stale=True)
-        return stale if stale is not None else components
+        return stale if stale is not None else (components, source)
 
     async def _resolve_bom_from_netsuite(self, item_id: str):
-        """Resolve an assembly's direct BOM from NetSuite (legacy-first, native fallback).
+        """Resolve an assembly's direct BOM from NetSuite (native-first, legacy fallback).
 
-        Legacy path: the custrecord_blend_bom_assembly SuiteQL join (no REST) — covers the ~989
-        Blend BOMs. Native fallback: masterDefault -> currentRevision via the REST record API for
-        the handful of native BOMs.
+        Native path (primary): assemblyItemBom.currentrevision -> components, ALL in SuiteQL (no
+        REST record call), so a single query shape also batches many assemblies at once
+        (see _get_item_boms_native_batch). Native is now the source of truth — with Blend frozen,
+        formula edits land only in native, so the legacy custom field is a stale snapshot.
+
+        Legacy path (fallback): the custrecord_blend_bom_assembly SuiteQL join, kept only for the
+        few assemblies that lack a native master-default mapping. The old REST helpers
+        (_resolve_current_revision / _get_components_by_revision) are retained only for the A/B diff.
 
         Returns (components, source, revision_id, has_bom, ok). `ok` is False when a NetSuite call
         ERRORED (429 exhausted, connection, etc.) — the empty result is then "unknown", not a
         confirmed "no BOM", so callers must NOT persist/overwrite the cache with it.
         """
         try:
+            # Native via SuiteQL (assemblyItemBom.currentrevision) — no REST record fetch.
+            components, revision_id = await self._get_item_bom_native(item_id)
+            if components:
+                return components, "native", revision_id, True, True
+
+            # Fallback: legacy Blend field, for assemblies without a native master-default mapping.
             components = await self._get_item_bom_legacy(item_id)
             if components:
                 return components, "legacy", None, True, True
-
-            revision_id = await self._resolve_current_revision(item_id)
-            if revision_id:
-                components = await self._get_components_by_revision(revision_id)
-                return components, "native", revision_id, bool(components), True
 
             return [], "native", None, False, True   # confirmed: item has no BOM
         except Exception as e:
@@ -152,7 +202,8 @@ class BOMService:
         }
 
     async def _read_bom_from_db(self, item_id: str, allow_stale: bool = False):
-        """Return cached components (possibly empty for a negative cache), or None on a miss/stale/error.
+        """Return (components, source) from cache (components may be [] for a negative cache), or
+        None on a miss/stale/error. source is 'native' | 'legacy' as persisted by the last resolve.
 
         allow_stale=True ignores the max-age check — used as a fallback when a live re-fetch fails,
         so we serve slightly-old data rather than nothing.
@@ -179,10 +230,10 @@ class BOMService:
                         return None  # stale -> re-fetch
 
                 if not formula.has_bom:
-                    return []  # negative cache: item has no BOM
+                    return [], formula.source  # negative cache: item has no BOM
 
                 rows = await get_bom_components(session, int(item_id))
-                return [self._component_row_to_dict(r) for r in rows]
+                return [self._component_row_to_dict(r) for r in rows], formula.source
         except Exception as e:
             logger.warning(f"[BOM] DB cache read failed for item {item_id}: {e}")
             return None  # fall through to NetSuite
@@ -274,35 +325,57 @@ class BOMService:
             })
             logger.info(f"[BOM-refresh] starting full refresh of {len(ids)} formulas")
 
-            # Batched (Lever 1): resolve each group of assemblies' legacy BOMs in ONE SuiteQL
-            # (parent_item.id IN (...)) instead of one call per assembly. Legacy hits are written
-            # directly; assemblies with no legacy rows (native / no-BOM) OR a whole-batch failure
-            # fall back to the vetted per-item refresh_bom_formula, so coverage never regresses.
+            # Batched: resolve each group of assemblies in ONE SuiteQL per source instead of one
+            # call (or a REST call) per assembly. NATIVE batch (assemblyItemBom.currentrevision, no
+            # REST) is the primary path and the source of truth; the legacy batch
+            # (custrecord_blend_bom_assembly join) is a fallback for the few assemblies without a
+            # native master-default mapping. Both write hits directly; only genuine no-BOM items or
+            # a whole-batch failure fall back to the vetted per-item refresh_bom_formula, so
+            # coverage never regresses.
             refreshed, errors, done = 0, 0, 0
             BATCH_SIZE = 50
             try:
                 for start_idx in range(0, len(ids), BATCH_SIZE):
                     batch = [str(x) for x in ids[start_idx:start_idx + BATCH_SIZE]]
                     try:
-                        legacy_map = await self._get_item_boms_legacy_batch(batch)
-                        batch_ok = True
+                        native_map = await self._get_item_boms_native_batch(batch)
                     except Exception as e:
                         logger.warning(
-                            f"[BOM-refresh] batch legacy query failed for {len(batch)} items: {e}; "
+                            f"[BOM-refresh] batch native query failed for {len(batch)} items: {e}; "
+                            f"falling back to legacy/per-item"
+                        )
+                        native_map = {}
+
+                    # Legacy batch only for what native didn't cover. On failure, those items drop to
+                    # the per-item path below rather than regressing coverage.
+                    legacy_ids = [iid for iid in batch if iid not in native_map]
+                    try:
+                        legacy_map = (
+                            await self._get_item_boms_legacy_batch(legacy_ids) if legacy_ids else {}
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"[BOM-refresh] batch legacy query failed for {len(legacy_ids)} items: {e}; "
                             f"falling back to per-item"
                         )
-                        legacy_map, batch_ok = {}, False
+                        legacy_map = {}
 
                     for iid in batch:
                         try:
-                            if batch_ok and iid in legacy_map:
+                            if iid in native_map:
+                                entry = native_map[iid]
+                                await self._write_bom_to_db(
+                                    iid, entry["components"], "native", entry.get("revision_id"), True
+                                )
+                                await self._invalidate_bom_in_memory(iid, entry.get("parent_sku"))
+                            elif iid in legacy_map:
                                 entry = legacy_map[iid]
                                 await self._write_bom_to_db(iid, entry["components"], "legacy", None, True)
                                 await self._invalidate_bom_in_memory(iid, entry.get("parent_sku"))
                             else:
-                                # native / no-BOM, or the batch query failed: vetted per-item path
-                                # (it re-checks legacy, then native, and raises on NetSuite error so
-                                # a good cached formula is never clobbered).
+                                # No batch rows (genuine no-BOM, or a whole-batch failure): vetted
+                                # per-item path — re-checks native then legacy (both SuiteQL now) and
+                                # raises on NetSuite error so a good cached formula is never clobbered.
                                 await self.refresh_bom_formula(iid)
                             refreshed += 1
                         except Exception as e:
@@ -529,6 +602,87 @@ class BOMService:
         )
         return grouped
 
+    async def _get_item_boms_native_batch(self, item_ids: List[str]) -> Dict[str, Dict]:
+        """Batched NATIVE BOM resolution: ONE SuiteQL for many assemblies via
+        assemblyItemBom.assembly IN (...), with NO REST record call.
+
+        assemblyItemBom is the standard NetSuite table mapping an assembly item to its Bill of
+        Materials; its `currentrevision` column is the current bomRevision (NetSuite already picks
+        it), and `assembly` is a scalar filterable id — so unlike bom.restricttoassemblies (a
+        non-filterable multi-select, the reason the old code fell back to REST) we can join straight
+        through to the component lines and batch the whole set. Standard-table based, so it keeps
+        working after the Blend custom field (custrecord_blend_bom_assembly) is cleared.
+
+        Same component row shape as _get_item_bom_legacy / _get_components_by_revision. Returns
+        {assembly_item_id: {"parent_sku": <sku>, "revision_id": <str>, "components": [<dicts>]}}.
+        Assemblies with no master-default BOM are simply absent (caller treats as no-BOM / per-item
+        fallback). Raises on NetSuite error (caller must not clobber the cache).
+        """
+        if not item_ids:
+            return {}
+        for iid in item_ids:
+            validate_numeric_id(iid, "item_id")
+        id_list = ",".join(f"'{iid}'" for iid in item_ids)
+
+        sql = f"""
+        SELECT
+            aib.assembly AS parent_id,
+            parent_item.itemid AS parent_sku,
+            aib.currentrevision AS revision_id,
+            b.id AS bom_id,
+            b.name AS bom_name,
+            item.id as internal_id,
+            item.itemid as component_sku,
+            (CASE WHEN item.displayname IS NULL THEN item.description ELSE item.displayname END) AS component_displayname,
+            item.displayname,
+            item.description AS component_name,
+            ROUND(component.quantity, 5) as quantity_required,
+            COALESCE(iu.name, BUILTIN.DF(component.units)) as unit,
+            CASE WHEN item.itemtype IN ('Assembly', 'Kit') THEN 'true' ELSE 'false' END as is_manufacturing,
+            CASE WHEN item.isphantom = 'T' THEN 'true' ELSE 'false' END as is_phantom
+        FROM assemblyItemBom aib
+        JOIN bomRevisionComponentMember AS component ON component.bomRevision = aib.currentrevision
+        JOIN bom as b ON aib.billofmaterials = b.id
+        JOIN item ON component.item = item.id
+        JOIN item parent_item ON parent_item.id = aib.assembly
+        LEFT JOIN ItemUnit as iu ON component.units = iu.key
+        WHERE aib.assembly IN ({id_list})
+        AND aib.masterdefault = 'T'
+        AND aib.inactive = 'No'
+        AND item.id != 5837
+        ORDER BY aib.assembly, b.id, item.id, component.quantity
+        """
+        start_time = time.time()
+        result = await self.netsuite_service.execute_suiteql(sql)
+        rows = result.get('items', [])
+        grouped: Dict[str, Dict] = {}
+        for row in rows:
+            pid = str(row.pop("parent_id", "") or "")
+            psku = row.pop("parent_sku", "") or ""
+            rev = str(row.pop("revision_id", "") or "") or None
+            if not pid:
+                continue
+            entry = grouped.setdefault(pid, {"parent_sku": psku, "revision_id": rev, "components": []})
+            entry["components"].append(row)
+        elapsed = time.time() - start_time
+        logger.info(
+            f"[TIMING] _get_item_boms_native_batch for {len(item_ids)} assemblies took {elapsed:.3f}s, "
+            f"{len(grouped)} had native BOMs, {len(rows)} rows"
+        )
+        return grouped
+
+    async def _get_item_bom_native(self, item_id: str):
+        """Single-assembly native BOM via SuiteQL (assemblyItemBom.currentrevision), no REST.
+
+        Thin wrapper over _get_item_boms_native_batch so the batch query is the single source of
+        truth. Returns (components, revision_id); ([], None) when the item has no master-default BOM.
+        """
+        grouped = await self._get_item_boms_native_batch([str(item_id)])
+        entry = grouped.get(str(item_id))
+        if not entry:
+            return [], None
+        return entry["components"], entry.get("revision_id")
+
     async def _invalidate_bom_in_memory(self, item_id: str, sku: Optional[str]) -> None:
         """Drop the in-memory BOM layers for an item using an already-known SKU (no NetSuite call)."""
         if not self.cache_manager:
@@ -630,71 +784,111 @@ class BOMService:
         return out
 
     async def get_full_bom(self, item_sku: str, max_depth=5, current_depth=0, item_id: Optional[str] = None) -> List[Dict]:
-        """Recursively fetch the full multi-level BOM for an item by SKU, up to max_depth levels.
+        """Fetch an item's BOM by SKU, expanding per SOURCE.
 
-        item_id, when passed, is the already-known internal id for item_sku (carried down from the
-        parent's component row) — it lets the recursion skip a redundant SKU->id NetSuite lookup.
+        A node's BOM is expanded based on where it came from:
+          - native source -> FLAT: a manufactured sub-assembly line (e.g. a made-to-stock
+            concentrate) is a stocked leaf, not exploded.
+          - legacy source -> MULTI-LEVEL: recurse into manufacturing sub-assemblies, as before, so
+            the legacy fallback stays a faithful (correct) multi-level BOM.
+        Each level re-decides, so a mixed tree resolves correctly. `max_depth` bounds the legacy
+        recursion; `current_depth` offsets the returned level.
+
+        item_id, when passed, is the already-known internal id for item_sku — skips the SKU->id
+        NetSuite lookup.
         """
         start_time = time.time()
-        logger.info(f"[TIMING] get_full_bom called for SKU: {item_sku}, depth: {current_depth}")
 
-        # Check cache at ALL depths
+        # In-memory full-BOM cache.
         if self.cache_manager:
             cache_key = make_bom_cache_key(item_sku)
             cached_bom = await self.cache_manager.get(cache_key)
             if cached_bom is not None:
-                adjusted_bom = []
-                for comp in cached_bom:
-                    adjusted_comp = comp.copy()
-                    adjusted_comp["level"] = comp.get("level", 0) + current_depth
-                    adjusted_bom.append(adjusted_comp)
-
-                elapsed = time.time() - start_time
-                logger.info(f"[CACHE HIT] get_full_bom for {item_sku} at depth {current_depth} returned from cache in {elapsed:.3f}s, {len(adjusted_bom)} components")
-                return adjusted_bom
+                adjusted = [dict(c, level=c.get("level", 0) + current_depth) for c in cached_bom]
+                logger.info(f"[CACHE HIT] get_full_bom for {item_sku}: {len(adjusted)} components")
+                return adjusted
 
         if current_depth > max_depth:
             return []
 
-        # Use the id already carried in the parent's component row to skip a redundant SKU->id
-        # NetSuite lookup; resolve from the SKU only at the top level (or as a defensive fallback).
         if not item_id:
             item_id = await self.get_item_id_by_sku(item_sku)
         if not item_id:
             return []
 
-        components = await self.get_item_bom(item_id)
-        full_bom = []
+        components, source = await self._get_item_bom_with_source(item_id)
+        full_bom: List[Dict] = []
+        for comp in components:
+            node = dict(comp, level=current_depth)
+            full_bom.append(node)
+            # Legacy BOMs are multi-level: expand manufacturing sub-assemblies (native stays flat).
+            if source == "legacy" and comp.get("is_manufacturing") == "true" and comp.get("internal_id"):
+                full_bom.extend(await self.get_full_bom(
+                    comp["component_sku"], max_depth, current_depth + 1, item_id=comp["internal_id"]
+                ))
 
-        for component in components:
-            component["level"] = current_depth
-            full_bom.append(component)
-
-            if component.get("is_manufacturing") == "true":
-                sub_bom = await self.get_full_bom(
-                    component["component_sku"],
-                    max_depth,
-                    current_depth + 1,
-                    item_id=component.get("internal_id"),
-                )
-                full_bom.extend(sub_bom)
-
-        elapsed = time.time() - start_time
-        logger.info(f"[TIMING] get_full_bom for {item_sku} at depth {current_depth} took {elapsed:.3f}s, returned {len(full_bom)} total components")
-
-        # Cache the result with base levels
         if self.cache_manager and full_bom:
-            base_bom = []
-            for comp in full_bom:
-                base_comp = comp.copy()
-                base_comp["level"] = comp.get("level", current_depth) - current_depth
-                base_bom.append(base_comp)
+            base_bom = [dict(c, level=c.get("level", current_depth) - current_depth) for c in full_bom]
+            await self.cache_manager.set(make_bom_cache_key(item_sku), base_bom)
 
-            cache_key = make_bom_cache_key(item_sku)
-            await self.cache_manager.set(cache_key, base_bom)
-            logger.info(f"[CACHED] Full BOM for {item_sku} at depth {current_depth} cached with {len(base_bom)} components")
-
+        logger.info(
+            f"[TIMING] get_full_bom for {item_sku} took {time.time() - start_time:.3f}s, "
+            f"{len(full_bom)} components (source={source})"
+        )
         return full_bom
+
+    async def get_full_boms_batch(self, roots: List[tuple]) -> List[List[Dict]]:
+        """Resolve the flat native BOMs for many assemblies in ONE SuiteQL (assemblyItemBom),
+        instead of one query per root.
+
+        roots: list of (item_sku, item_id) — item_id is the assembly's internal id (or None).
+        Returns a list of component lists aligned to `roots` order (each row at level 0).
+
+        Native BOMs are flat: a manufactured sub-assembly line (e.g. a made-to-stock concentrate)
+        is treated as a stocked leaf, NOT exploded — so the single batched query IS the complete
+        BOM for every root and no recursion is needed. Roots already warm in the SKU-level cache
+        skip the query; roots without a native master-default BOM fall back to the legacy direct
+        components, so coverage never regresses.
+        """
+        results: List[Optional[List[Dict]]] = [None] * len(roots)
+
+        # Serve any roots already warm in the in-memory cache; only query the rest.
+        fetch_idx: List[int] = []
+        for k, (sku, _iid) in enumerate(roots):
+            if self.cache_manager:
+                cached = await self.cache_manager.get(make_bom_cache_key(sku))
+                if cached is not None:
+                    results[k] = [dict(c) for c in cached]
+                    continue
+            fetch_idx.append(k)
+
+        # ONE batched native query for all uncached ids.
+        ids = [str(roots[k][1]) for k in fetch_idx if roots[k][1]]
+        native_map: Dict[str, Dict] = {}
+        if ids:
+            try:
+                native_map = await self._get_item_boms_native_batch(ids)
+            except Exception as e:
+                logger.warning(f"[BOM] batch native query failed ({e}); falling back to legacy per-root")
+                native_map = {}
+
+        for k in fetch_idx:
+            sku, iid = roots[k]
+            iid = str(iid) if iid else None
+            entry = native_map.get(iid) if iid else None
+            if entry is not None:
+                full = [dict(c, level=0) for c in entry["components"]]
+                if self.cache_manager and full:
+                    await self.cache_manager.set(make_bom_cache_key(sku), full)
+                await self._write_bom_to_db(iid, entry["components"], "native", entry.get("revision_id"), True)
+                results[k] = full
+            else:
+                # No native master-default BOM (or the batch failed): fall back to the per-root
+                # resolver, which multi-level-expands a legacy BOM (faithful) and stays flat for a
+                # native one — so the fallback is correct, not a thin flat list.
+                results[k] = await self.get_full_bom(sku, item_id=iid)
+
+        return [r if r is not None else [] for r in results]
 
     async def get_item_by_sku(self, item_sku: str) -> Optional[Dict]:
         """Get item details by SKU (used by production_service)."""
