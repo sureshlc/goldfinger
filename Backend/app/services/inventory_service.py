@@ -7,18 +7,28 @@ import time
 logger = logging.getLogger(__name__)
 
 class InventoryService:
+    # Cap ids per SuiteQL so a large set never exceeds NetSuite's ~1000-row page cap. Inventory rows
+    # are items x locations x statuses, so hundreds of ids in one query can silently truncate and
+    # under-report availability. 200 keeps each query well under the cap.
+    INVENTORY_ID_CHUNK = 200
+
     def __init__(self, netsuite_service: NetSuiteService):
         self.netsuite_service = netsuite_service
 
     async def get_inventory_levels(self, item_ids: List[str], location_name: Optional[str] = None) -> List[Dict]:
         """
         Get inventory levels for multiple items filtered optionally by location.
+
+        Chunked at INVENTORY_ID_CHUNK ids/query so a large id set never exceeds NetSuite's ~1000-row
+        SuiteQL page cap (which pages silently, truncating results). Each item's rows fall entirely
+        within its chunk, so chunking by id needs no cross-chunk merge.
         """
         start_time = time.time()
 
         for item_id in item_ids:
             validate_numeric_id(item_id, "item_id")
-        item_list = "', '".join(item_ids)
+        if not item_ids:
+            return []
 
         location_filter = ""
         if location_name:
@@ -26,47 +36,50 @@ class InventoryService:
             safe_location = sanitize_suiteql_value(location_name)
             location_filter = f"AND BUILTIN.DF(ib.location) = '{safe_location}'"
 
-        sql = f"""
-        WITH CTE AS (
-        SELECT
-            ib.item as item_id,
-            i.itemid as item_sku,
-            i.displayname as item_name,
-            sum(ib.quantityavailable) as quantity_available,
-            sum(ib.quantityonhand) as quantity_on_hand,
-            ib.committedqtyperlocation as committed_quantity,
-            BUILTIN.DF(inventorystatus) as inventory_status,
-            BUILTIN.DF(ib.location) as location_name
-        FROM inventorybalance ib
-        JOIN item i ON ib.item = i.id
-        WHERE BUILTIN.DF(inventorystatus)='Good'
-        AND ib.item IN ('{item_list}')
-        {location_filter}
-        GROUP BY ib.item, i.itemid, i.displayname, BUILTIN.DF(inventorystatus), BUILTIN.DF(ib.location), ib.committedqtyperlocation
-        ORDER BY i.itemid ASC)
-
-        SELECT
-            item_id,
-            item_sku,
-            item_name,
-            CASE
-                WHEN sum(quantity_on_hand - committed_quantity) < 0 THEN 0
-                ELSE sum(quantity_on_hand - committed_quantity)
-            END AS available_quantity,
-            sum(quantity_on_hand) AS on_hand,
-            sum(committed_quantity) AS committed,
-            inventory_status
-        FROM CTE
-        GROUP BY item_id, item_sku, item_name, inventory_status
-        """
-
+        rows: List[Dict] = []
         try:
-            result = await self.netsuite_service.execute_suiteql(sql)
-            
+            for i in range(0, len(item_ids), self.INVENTORY_ID_CHUNK):
+                item_list = "', '".join(item_ids[i:i + self.INVENTORY_ID_CHUNK])
+                sql = f"""
+                WITH CTE AS (
+                SELECT
+                    ib.item as item_id,
+                    i.itemid as item_sku,
+                    i.displayname as item_name,
+                    sum(ib.quantityavailable) as quantity_available,
+                    sum(ib.quantityonhand) as quantity_on_hand,
+                    ib.committedqtyperlocation as committed_quantity,
+                    BUILTIN.DF(inventorystatus) as inventory_status,
+                    BUILTIN.DF(ib.location) as location_name
+                FROM inventorybalance ib
+                JOIN item i ON ib.item = i.id
+                WHERE BUILTIN.DF(inventorystatus)='Good'
+                AND ib.item IN ('{item_list}')
+                {location_filter}
+                GROUP BY ib.item, i.itemid, i.displayname, BUILTIN.DF(inventorystatus), BUILTIN.DF(ib.location), ib.committedqtyperlocation
+                ORDER BY i.itemid ASC)
+
+                SELECT
+                    item_id,
+                    item_sku,
+                    item_name,
+                    CASE
+                        WHEN sum(quantity_on_hand - committed_quantity) < 0 THEN 0
+                        ELSE sum(quantity_on_hand - committed_quantity)
+                    END AS available_quantity,
+                    sum(quantity_on_hand) AS on_hand,
+                    sum(committed_quantity) AS committed,
+                    inventory_status
+                FROM CTE
+                GROUP BY item_id, item_sku, item_name, inventory_status
+                """
+                result = await self.netsuite_service.execute_suiteql(sql)
+                rows.extend(result.get('items', []))
+
             elapsed = time.time() - start_time
-            logger.info(f"[TIMING] get_inventory_levels for {len(item_ids)} items took {elapsed:.3f}s")
-            
-            return result.get('items', [])
+            n_chunks = (len(item_ids) + self.INVENTORY_ID_CHUNK - 1) // self.INVENTORY_ID_CHUNK
+            logger.info(f"[TIMING] get_inventory_levels for {len(item_ids)} items took {elapsed:.3f}s ({n_chunks} chunk(s))")
+            return rows
         except Exception as e:
             logger.error(f"Failed to get inventory levels for items {item_ids}: {e}")
             return []
