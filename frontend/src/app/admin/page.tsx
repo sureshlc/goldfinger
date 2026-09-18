@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { ArrowLeft, Eye, EyeOff, Upload, Download, X, Check, X as XIcon, Key, Copy, ClipboardCheck, RefreshCw } from "lucide-react";
 import { useAuth } from "../contexts/AuthContext";
 import { fetchWithAuth, API_BASE_URL } from "../services/auth";
+import Pagination from "../components/Pagination";
 
 function usePasswordStrength(password: string) {
   return useMemo(() => {
@@ -233,29 +234,7 @@ function AuditLogsTab() {
               </tbody>
             </table>
           </div>
-          <div className="flex items-center justify-between px-4 py-3 border-t border-gray-100 bg-gray-50">
-            <span className="text-sm text-gray-500">
-              Page {page} of {totalPages} ({total} total)
-            </span>
-            <div className="flex gap-2">
-              <button
-                onClick={() => setPage((p) => Math.max(1, p - 1))}
-                disabled={page <= 1}
-                className="px-3 py-1 text-sm border border-gray-200 rounded-lg hover:bg-gray-100 disabled:opacity-50 transition"
-                type="button"
-              >
-                Prev
-              </button>
-              <button
-                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                disabled={page >= totalPages}
-                className="px-3 py-1 text-sm border border-gray-200 rounded-lg hover:bg-gray-100 disabled:opacity-50 transition"
-                type="button"
-              >
-                Next
-              </button>
-            </div>
-          </div>
+          <Pagination page={page} totalPages={totalPages} total={total} onChange={setPage} />
         </>
       )}
     </div>
@@ -810,29 +789,7 @@ function ItemsTab() {
                 </tbody>
               </table>
             </div>
-            <div className="flex items-center justify-between px-4 py-3 border-t border-gray-100 bg-gray-50">
-              <span className="text-sm text-gray-500">
-                Page {page} of {totalPages} ({total} total)
-              </span>
-              <div className="flex gap-2">
-                <button
-                  onClick={() => setPage((p) => Math.max(1, p - 1))}
-                  disabled={page <= 1}
-                  className="px-3 py-1 text-sm border border-gray-200 rounded-lg hover:bg-gray-100 disabled:opacity-50 transition"
-                  type="button"
-                >
-                  Prev
-                </button>
-                <button
-                  onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                  disabled={page >= totalPages}
-                  className="px-3 py-1 text-sm border border-gray-200 rounded-lg hover:bg-gray-100 disabled:opacity-50 transition"
-                  type="button"
-                >
-                  Next
-                </button>
-              </div>
-            </div>
+            <Pagination page={page} totalPages={totalPages} total={total} onChange={setPage} />
           </>
         )}
       </div>
@@ -1352,29 +1309,7 @@ function APIKeysTab() {
               </table>
             </div>
             {totalPages > 1 && (
-              <div className="flex items-center justify-between px-4 py-3 border-t border-gray-100 bg-gray-50">
-                <span className="text-sm text-gray-500">
-                  Page {page} of {totalPages} ({total} total)
-                </span>
-                <div className="flex gap-2">
-                  <button
-                    onClick={() => setPage((p) => Math.max(1, p - 1))}
-                    disabled={page <= 1}
-                    className="px-3 py-1 text-sm border border-gray-200 rounded-lg hover:bg-gray-100 disabled:opacity-50 transition"
-                    type="button"
-                  >
-                    Prev
-                  </button>
-                  <button
-                    onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                    disabled={page >= totalPages}
-                    className="px-3 py-1 text-sm border border-gray-200 rounded-lg hover:bg-gray-100 disabled:opacity-50 transition"
-                    type="button"
-                  >
-                    Next
-                  </button>
-                </div>
-              </div>
+              <Pagination page={page} totalPages={totalPages} total={total} onChange={setPage} />
             )}
           </>
         )}
