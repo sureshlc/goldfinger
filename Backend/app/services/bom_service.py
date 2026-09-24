@@ -846,20 +846,45 @@ class BOMService:
 
         Native BOMs are flat: a manufactured sub-assembly line (e.g. a made-to-stock concentrate)
         is treated as a stocked leaf, NOT exploded — so the single batched query IS the complete
-        BOM for every root and no recursion is needed. Roots already warm in the SKU-level cache
-        skip the query; roots without a native master-default BOM fall back to the legacy direct
-        components, so coverage never regresses.
+        BOM for every root and no recursion is needed.
+
+        Cache order per root: in-memory SKU-level cache -> persisted DB recipe cache (read-through,
+        no NetSuite — this is what the weekly refresh keeps warm) -> ONE batched NetSuite query for
+        whatever is cached nowhere. This matters for the hourly partner sweep: without the DB read,
+        the 1h in-memory cache expires each hour and every recipe re-hits NetSuite even though we
+        have it persisted.
         """
         results: List[Optional[List[Dict]]] = [None] * len(roots)
 
-        # Serve any roots already warm in the in-memory cache; only query the rest.
         fetch_idx: List[int] = []
-        for k, (sku, _iid) in enumerate(roots):
+        for k, (sku, iid) in enumerate(roots):
+            iid_s = str(iid) if iid else None
+
+            # 1. In-memory full-BOM cache (fastest).
             if self.cache_manager:
                 cached = await self.cache_manager.get(make_bom_cache_key(sku))
                 if cached is not None:
                     results[k] = [dict(c) for c in cached]
                     continue
+
+            # 2. Persisted DB recipe cache (read-through, NO NetSuite). Native is flat -> serve
+            #    directly and warm the in-memory layer; legacy needs source-gated multi-level, so
+            #    defer to get_full_bom (itself DB-served per node). A stale/missing formula returns
+            #    None and falls through to the NetSuite batch.
+            if iid_s:
+                db = await self._read_bom_from_db(iid_s)
+                if db is not None:
+                    comps, src = db
+                    if src == "native":
+                        full = [dict(c, level=0) for c in comps]
+                        results[k] = full
+                        if self.cache_manager:
+                            await self.cache_manager.set(make_bom_cache_key(sku), full)
+                    else:
+                        results[k] = await self.get_full_bom(sku, item_id=iid_s)
+                    continue
+
+            # 3. Cached nowhere -> resolve from NetSuite (batched below).
             fetch_idx.append(k)
 
         # ONE batched native query for all uncached ids.
