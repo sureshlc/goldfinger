@@ -692,7 +692,8 @@ class BOMService:
             await self.cache_manager.invalidate(make_bom_cache_key(sku))
 
     async def get_item_details(self, item_id: str) -> Optional[Dict]:
-        """Get detailed information for a specific item by ID. Uses cache if available."""
+        """Get detailed information for a specific item by ID. Lookup order: in-memory cache ->
+        our own DB (name + recipe-cache manufacturing flag) -> NetSuite."""
         # Check cache first
         if self.cache_manager:
             cache_key = make_item_details_cache_key(item_id)
@@ -700,6 +701,16 @@ class BOMService:
             if cached_details is not None:
                 logger.debug(f"Cache HIT for item details: {item_id}")
                 return cached_details
+
+        # DB read-through: serve from our own data when we can confirm it (in the catalog AND with a
+        # cached recipe). Same read-through the batch path uses, so the single-SKU page also stops
+        # re-fetching item details from NetSuite.
+        db = await self._item_details_from_db([str(item_id)])
+        det = db.get(str(item_id))
+        if det is not None:
+            if self.cache_manager:
+                await self.cache_manager.set(make_item_details_cache_key(item_id), det)
+            return det
 
         start_time = time.time()
         validate_numeric_id(item_id, "item_id")
