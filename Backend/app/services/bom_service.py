@@ -736,10 +736,60 @@ class BOMService:
             logger.error(f"Failed to get item details for item ID {item_id}: {e}")
             return None
 
+    async def _item_details_from_db(self, item_ids: List[str]) -> Dict[str, Dict]:
+        """Build item details from our own data — display name from the items table, manufacturing
+        flag from the recipe cache (an item with a cached recipe is, by definition, manufactured).
+
+        Returns {id: details} ONLY for ids we can confirm: present in the items table AND with a
+        cached recipe (has_bom=True). Everything else is omitted so the caller falls back to
+        NetSuite — so we never guess an item's manufacturing status. Same row shape as
+        get_item_details (itemtype is reported 'Assembly' for these confirmed manufactured items,
+        which is all the batch path uses it for).
+        """
+        if not BOM_DB_CACHE_ENABLED or not item_ids:
+            return {}
+        try:
+            from sqlalchemy import select
+            from app.database.connection import get_session_factory
+            from app.database.models import ItemDB, BOMFormulaDB
+
+            int_ids = [int(i) for i in item_ids]
+            factory = get_session_factory()
+            async with factory() as session:
+                item_rows = (await session.execute(
+                    select(ItemDB.id, ItemDB.sku, ItemDB.name).where(ItemDB.id.in_(int_ids))
+                )).all()
+                item_map = {str(r.id): (r.sku, r.name) for r in item_rows}
+                formula_rows = (await session.execute(
+                    select(BOMFormulaDB.assembly_item_id, BOMFormulaDB.has_bom).where(
+                        BOMFormulaDB.assembly_item_id.in_(int_ids)
+                    )
+                )).all()
+                has_bom_map = {str(r.assembly_item_id): r.has_bom for r in formula_rows}
+
+            out: Dict[str, Dict] = {}
+            for iid in item_ids:
+                iid = str(iid)
+                if iid in item_map and has_bom_map.get(iid):  # in catalog AND has a recipe
+                    sku, name = item_map[iid]
+                    out[iid] = {
+                        "id": iid,
+                        "itemid": sku,
+                        "displayname": name or sku,
+                        "itemtype": "Assembly",
+                        "description": name,
+                        "is_manufacturing": "true",
+                    }
+            return out
+        except Exception as e:
+            logger.warning(f"[item-details] DB read failed ({e}); falling back to NetSuite")
+            return {}
+
     async def get_item_details_bulk(self, item_ids: List[str]) -> Dict[str, Dict]:
-        """Fetch details for many item ids in ONE SuiteQL (WHERE id IN (...)) and populate the
-        in-memory item-details cache. Same row shape as get_item_details, so a later per-id
-        get_item_details(id) is a cache hit. Only cache-misses are queried; returns {id: details}.
+        """Fetch details for many item ids and populate the in-memory item-details cache. Same row
+        shape as get_item_details. Lookup order: in-memory cache -> our own DB (name from the items
+        table + manufacturing flag from the recipe cache) -> ONE SuiteQL for whatever is left. Only
+        cache-misses are queried; returns {id: details}.
         """
         out: Dict[str, Dict] = {}
         misses: List[str] = []
@@ -754,6 +804,18 @@ class BOMService:
 
         # Dedup misses, preserve order.
         misses = list(dict.fromkeys(misses))
+        if not misses:
+            return out
+
+        # DB read-through: serve details we can build from our own data (name from the items table,
+        # manufacturing flag from the recipe cache) so the hourly partner sweep stops re-fetching
+        # item details from NetSuite. Only ids we can't confirm fall through to NetSuite.
+        db_details = await self._item_details_from_db(misses)
+        for iid, det in db_details.items():
+            out[iid] = det
+            if self.cache_manager:
+                await self.cache_manager.set(make_item_details_cache_key(iid), det)
+        misses = [i for i in misses if i not in db_details]
         if not misses:
             return out
 
