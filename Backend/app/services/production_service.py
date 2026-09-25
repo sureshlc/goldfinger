@@ -563,13 +563,14 @@ class ProductionService:
         logger.info(f"=== [TIMING] Starting production analysis for item {item_identifier}, quantity {desired_quantity} ===")
 
         resolution_start = time.time()
-        # Resolve via the local items table (no per-SKU NetSuite verify — the item-details fetch
-        # below is the single source of truth). Fall back to the full resolver only on a miss
-        # (raw internal id, or a SKU absent from the local table).
+        # Resolve via the local items table; on a miss it already falls back to a NetSuite SKU
+        # lookup. So only try the full resolver when the input is a raw numeric internal id (which a
+        # SKU lookup can't match) — a non-numeric SKU that this couldn't find genuinely doesn't
+        # exist, and re-resolving would just re-hit NetSuite for nothing.
         from app.utils.identifier_resolution import resolve_skus_bulk
         bulk_resolved = await resolve_skus_bulk([item_identifier], self.bom_service)
         resolved_id = bulk_resolved.get(item_identifier, {}).get("id")
-        if not resolved_id:
+        if not resolved_id and str(item_identifier).isdigit():
             resolved_id = await self._resolve_identifier(item_identifier)
         logger.info(f"[TIMING] SKU resolution took {time.time() - resolution_start:.3f}s")
 
